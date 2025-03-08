@@ -89,9 +89,14 @@ export class ContentGenerator {
         
         Generate 3 different prompts.`;
 
-      const response = await this.openai.complete({ prompt });
-      const prompts = response.split('\n').filter(Boolean);
-      return prompts.length > 0 ? prompts : [`Instagram ${request.type} about ${request.topic} in ${request.style || 'modern'} style, ${request.mood || 'positive'} mood.`];
+      const response = await this.openai.generateCompletion(prompt);
+      const prompts = response.split('\n').filter(line => line.trim().length > 0);
+      
+      if (prompts.length === 0) {
+        return [`Instagram ${request.type} about ${request.topic} in ${request.style || 'modern'} style, ${request.mood || 'positive'} mood.`];
+      }
+      
+      return prompts;
     } catch (error) {
       this.logger.error('Failed to generate image prompts', { error });
       throw new Error('Failed to generate image prompts');
@@ -106,14 +111,7 @@ export class ContentGenerator {
       const images: string[] = [];
 
       for (const prompt of prompts) {
-        const imageUrls = await this.openai.generateImage({
-          prompt,
-          n: 1,
-          size: '1024x1024',
-          quality: 'hd',
-          style: 'vivid'
-        });
-
+        const imageUrls = await this.openai.generateImage(prompt);
         images.push(...imageUrls);
       }
 
@@ -169,7 +167,7 @@ export class ContentGenerator {
     try {
       // Analyze images
       const imageAnalysesPromises = images.map(imageUrl => 
-        this.openai.analyzeImage({ imageUrl }).catch(() => 'Image analysis failed')
+        this.openai.analyzeImage(imageUrl, 'Describe this image in detail, focusing on visual elements, style, and mood.').catch(() => 'Image analysis failed')
       );
       
       const imageAnalyses = await Promise.all(imageAnalysesPromises);
@@ -192,7 +190,7 @@ export class ContentGenerator {
         References:
         ${request.references ? request.references.join('\n') : 'None provided'}`;
 
-      const caption = await this.openai.complete({ prompt });
+      const caption = await this.openai.generateCompletion(prompt);
       return caption;
     } catch (error) {
       this.logger.error('Failed to generate caption', { error });
@@ -224,7 +222,7 @@ export class ContentGenerator {
         
         Generate 15-20 hashtags.`;
 
-      const response = await this.openai.complete({ prompt });
+      const response = await this.openai.generateCompletion(prompt);
       const hashtags = response.match(/#[\w\d]+/g) || [];
       return await this.validateHashtags(hashtags);
     } catch (error) {
