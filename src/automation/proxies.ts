@@ -11,8 +11,10 @@ interface Proxy {
   failCount?: number;
 }
 
+type ProxyType = 'manual' | 'api' | 'file';
+
 interface ProxyConfig {
-  type: 'manual' | 'api' | 'file';
+  type: ProxyType;
   apiUrl?: string;
   apiKey?: string;
   filePath?: string;
@@ -119,7 +121,9 @@ export class ProxyManager {
     }
 
     this.proxies = proxies.map(proxy => ({
-      ...proxy,
+      url: proxy.url,
+      username: proxy.username,
+      password: proxy.password,
       failCount: 0
     }));
   }
@@ -138,7 +142,9 @@ export class ProxyManager {
       }
 
       this.proxies = response.data.proxies.map(proxy => ({
-        ...proxy,
+        url: proxy.url,
+        username: proxy.username,
+        password: proxy.password,
         failCount: 0
       }));
     } catch (error) {
@@ -160,7 +166,9 @@ export class ProxyManager {
       }
 
       this.proxies = proxies.map(proxy => ({
-        ...proxy,
+        url: proxy.url,
+        username: proxy.username,
+        password: proxy.password,
         failCount: 0
       }));
     } catch (error) {
