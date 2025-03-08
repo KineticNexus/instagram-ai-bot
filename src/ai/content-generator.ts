@@ -21,6 +21,12 @@ interface ContentResult {
   suggestedTime?: Date;
 }
 
+interface SearchResult {
+  title: string;
+  description: string;
+  url: string;
+}
+
 export class ContentGenerator {
   constructor(
     private logger: Logger,
@@ -62,7 +68,7 @@ export class ContentGenerator {
       };
     } catch (error) {
       this.logger.error('Failed to generate content', { error });
-      throw error;
+      throw new Error('Failed to generate content');
     }
   }
 
@@ -84,10 +90,11 @@ export class ContentGenerator {
         Generate 3 different prompts.`;
 
       const response = await this.openai.complete({ prompt });
-      return response.split('\n').filter(Boolean);
+      const prompts = response.split('\n').filter(Boolean);
+      return prompts.length > 0 ? prompts : [`Instagram ${request.type} about ${request.topic} in ${request.style || 'modern'} style, ${request.mood || 'positive'} mood.`];
     } catch (error) {
       this.logger.error('Failed to generate image prompts', { error });
-      throw error;
+      throw new Error('Failed to generate image prompts');
     }
   }
 
@@ -110,10 +117,14 @@ export class ContentGenerator {
         images.push(...imageUrls);
       }
 
+      if (images.length === 0) {
+        throw new Error('No images were generated');
+      }
+
       return images;
     } catch (error) {
       this.logger.error('Failed to generate images', { error });
-      throw error;
+      throw new Error('Failed to generate images');
     }
   }
 
@@ -147,7 +158,7 @@ export class ContentGenerator {
       return processedImages;
     } catch (error) {
       this.logger.error('Failed to process images', { error });
-      throw error;
+      throw new Error('Failed to process images');
     }
   }
 
@@ -157,9 +168,11 @@ export class ContentGenerator {
   private async generateCaption(request: ContentRequest, images: string[]): Promise<string> {
     try {
       // Analyze images
-      const imageAnalyses = await Promise.all(
-        images.map(imageUrl => this.openai.analyzeImage({ imageUrl }))
+      const imageAnalysesPromises = images.map(imageUrl => 
+        this.openai.analyzeImage({ imageUrl }).catch(() => 'Image analysis failed')
       );
+      
+      const imageAnalyses = await Promise.all(imageAnalysesPromises);
 
       const prompt = `Generate an engaging Instagram caption for content about ${request.topic}.
         
@@ -183,7 +196,7 @@ export class ContentGenerator {
       return caption;
     } catch (error) {
       this.logger.error('Failed to generate caption', { error });
-      throw error;
+      throw new Error('Failed to generate caption');
     }
   }
 
@@ -194,7 +207,7 @@ export class ContentGenerator {
     try {
       if (request.hashtags && request.hashtags.length > 0) {
         // Validate provided hashtags
-        return this.validateHashtags(request.hashtags);
+        return await this.validateHashtags(request.hashtags);
       }
 
       const prompt = `Generate relevant Instagram hashtags for content about ${request.topic}.
@@ -213,10 +226,10 @@ export class ContentGenerator {
 
       const response = await this.openai.complete({ prompt });
       const hashtags = response.match(/#[\w\d]+/g) || [];
-      return this.validateHashtags(hashtags);
+      return await this.validateHashtags(hashtags);
     } catch (error) {
       this.logger.error('Failed to generate hashtags', { error });
-      throw error;
+      throw new Error('Failed to generate hashtags');
     }
   }
 
@@ -228,22 +241,27 @@ export class ContentGenerator {
       const validatedHashtags: string[] = [];
 
       for (const hashtag of hashtags) {
-        // Check if hashtag is banned or flagged
-        const searchResults = await this.braveSearch.search(`instagram ${hashtag} banned OR flagged`);
-        const isFlagged = searchResults.some(result =>
-          result.title.toLowerCase().includes('banned') ||
-          result.description.toLowerCase().includes('banned')
-        );
+        try {
+          // Check if hashtag is banned or flagged
+          const searchResults = await this.braveSearch.search(`instagram ${hashtag} banned OR flagged`);
+          const isFlagged = searchResults.some((result: SearchResult) =>
+            result.title.toLowerCase().includes('banned') ||
+            result.description.toLowerCase().includes('banned')
+          );
 
-        if (!isFlagged) {
+          if (!isFlagged) {
+            validatedHashtags.push(hashtag);
+          }
+        } catch (error) {
+          // If search fails, include the hashtag by default
           validatedHashtags.push(hashtag);
         }
       }
 
-      return validatedHashtags;
+      return validatedHashtags.length > 0 ? validatedHashtags : ['#instagram', '#content'];
     } catch (error) {
       this.logger.error('Failed to validate hashtags', { error });
-      throw error;
+      throw new Error('Failed to validate hashtags');
     }
   }
 
@@ -255,9 +273,13 @@ export class ContentGenerator {
       const now = new Date();
       const optimalHours = this.config.get('instagram.optimalPostingHours') as number[];
       
+      // Default to some reasonable hours if not configured
+      const defaultHours = [9, 12, 15, 18, 21];
+      const hours = optimalHours && optimalHours.length > 0 ? optimalHours : defaultHours;
+      
       // Find next optimal hour
       const currentHour = now.getHours();
-      const nextOptimalHour = optimalHours.find(hour => hour > currentHour) || optimalHours[0];
+      const nextOptimalHour = hours.find(hour => hour > currentHour) || hours[0];
       
       const suggestedTime = new Date(now);
       suggestedTime.setHours(nextOptimalHour, 0, 0, 0);
@@ -270,7 +292,11 @@ export class ContentGenerator {
       return suggestedTime;
     } catch (error) {
       this.logger.error('Failed to determine suggested time', { error });
-      throw error;
+      // Default to tomorrow at 9am if there's an error
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      tomorrow.setHours(9, 0, 0, 0);
+      return tomorrow;
     }
   }
 }
