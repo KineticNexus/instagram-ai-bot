@@ -3,7 +3,7 @@ import { Config } from './config';
 import { Repository } from '../database/repository';
 import { DecisionEngine } from '../ai/decision-engine';
 
-interface ScheduledTask {
+export interface ScheduledTask {
   id: string;
   type: string;
   schedule: Date;
