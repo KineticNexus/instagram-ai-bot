@@ -1,275 +1,363 @@
 import { Logger } from '../core/logger';
 import { Config } from '../core/config';
-import { InstagramAutomation } from '../automation/instagram';
-import { BraveSearchClient } from '../api/brave';
-import { Repository } from '../database/repository';
 import { OpenAIClient } from '../api/openai';
+import { BraveSearchClient } from '../api/brave';
+import { InstagramAutomation } from '../automation/instagram';
 
-interface CompetitorInsight {
+interface CompetitorProfile {
   username: string;
-  postFrequency: number;
-  avgLikes: number;
-  avgComments: number;
+  fullName: string;
+  bio: string;
+  followerCount: number;
+  followingCount: number;
+  postCount: number;
+  engagementRate: number;
   topHashtags: string[];
-  contentTypes: {
-    images: number;
-    carousels: number;
-    reels: number;
-    stories: number;
-  };
-  postingTimes: {
-    hour: number;
-    count: number;
-  }[];
-  engagement: {
-    rate: number;
-    trend: 'increasing' | 'decreasing' | 'stable';
-  };
+  postFrequency: number;
+  bestPerformingContent: any[];
 }
 
-interface CompetitorAnalysis {
-  insights: CompetitorInsight[];
-  recommendations: {
+interface ContentAnalysis {
+  type: string;
+  caption: string;
+  hashtags: string[];
+  likes: number;
+  comments: number;
+  engagement: number;
+  postedAt: Date;
+  mediaUrls: string[];
+  insights: string[];
+}
+
+interface CompetitorInsights {
+  profile: CompetitorProfile;
+  contentAnalysis: ContentAnalysis[];
+  recommendations: string[];
+  trends: {
     hashtags: string[];
-    postingTimes: number[];
-    contentTypes: string[];
-    engagementStrategies: string[];
+    topics: string[];
+    styles: string[];
+    timing: { [key: string]: number };
   };
-  timestamp: Date;
 }
 
 export class CompetitorAnalyzer {
   constructor(
     private logger: Logger,
     private config: Config,
-    private instagram: InstagramAutomation,
+    private openai: OpenAIClient,
     private braveSearch: BraveSearchClient,
-    private repository: Repository,
-    private openai: OpenAIClient
+    private instagram: InstagramAutomation
   ) {}
 
   /**
-   * Get latest competitor insights
+   * Analyze competitors
    */
-  async getLatestInsights(): Promise<CompetitorAnalysis> {
+  async analyzeCompetitors(competitors: string[]): Promise<CompetitorInsights[]> {
     try {
-      const competitors = this.config.get('competitors');
-      const insights: CompetitorInsight[] = [];
-      
-      for (const competitor of competitors) {
-        const insight = await this.analyzeCompetitor(competitor);
-        insights.push(insight);
+      const insights: CompetitorInsights[] = [];
+
+      for (const username of competitors) {
+        this.logger.info('Analyzing competitor', { username });
+
+        // Get profile data
+        const profile = await this.analyzeProfile(username);
+
+        // Get recent posts
+        const posts = await this.instagram.getRecentPosts(username, 20);
+
+        // Analyze content
+        const contentAnalysis = await this.analyzeContent(posts);
+
+        // Generate recommendations
+        const recommendations = await this.generateRecommendations(profile, contentAnalysis);
+
+        // Identify trends
+        const trends = await this.identifyTrends(contentAnalysis);
+
+        insights.push({
+          profile,
+          contentAnalysis,
+          recommendations,
+          trends
+        });
       }
-      
-      const analysis = await this.generateAnalysis(insights);
-      await this.repository.saveCompetitorAnalysis(analysis);
-      
-      return analysis;
+
+      return insights;
     } catch (error) {
-      this.logger.error('Error getting competitor insights', { error });
+      this.logger.error('Failed to analyze competitors', { error });
       throw error;
     }
   }
 
   /**
-   * Analyze a single competitor
+   * Analyze competitor profile
    */
-  private async analyzeCompetitor(username: string): Promise<CompetitorInsight> {
+  private async analyzeProfile(username: string): Promise<CompetitorProfile> {
     try {
-      // Get competitor profile and recent posts
-      const profile = await this.instagram.getProfile(username);
-      const posts = await this.instagram.getRecentPosts(username, 50);
-      
-      // Calculate metrics
-      const postFrequency = this.calculatePostFrequency(posts);
-      const avgLikes = this.calculateAverageLikes(posts);
-      const avgComments = this.calculateAverageComments(posts);
-      const topHashtags = this.extractTopHashtags(posts);
-      const contentTypes = this.analyzeContentTypes(posts);
-      const postingTimes = this.analyzePostingTimes(posts);
-      const engagement = this.calculateEngagement(posts, profile.followerCount);
-      
+      // Get profile data from Instagram
+      const profileData = await this.instagram.getProfile(username);
+
+      // Calculate engagement rate
+      const engagementRate = await this.calculateEngagementRate(username);
+
+      // Get top hashtags
+      const topHashtags = await this.getTopHashtags(username);
+
+      // Calculate post frequency
+      const postFrequency = await this.calculatePostFrequency(username);
+
+      // Get best performing content
+      const bestPerformingContent = await this.getBestPerformingContent(username);
+
       return {
-        username,
-        postFrequency,
-        avgLikes,
-        avgComments,
+        username: profileData.username,
+        fullName: profileData.fullName,
+        bio: profileData.bio,
+        followerCount: profileData.followerCount,
+        followingCount: profileData.followingCount,
+        postCount: profileData.postCount,
+        engagementRate,
         topHashtags,
-        contentTypes,
-        postingTimes,
-        engagement
+        postFrequency,
+        bestPerformingContent
       };
     } catch (error) {
-      this.logger.error('Error analyzing competitor', { error, username });
+      this.logger.error('Failed to analyze profile', { error });
       throw error;
     }
   }
 
   /**
-   * Calculate post frequency (posts per day)
+   * Calculate engagement rate
    */
-  private calculatePostFrequency(posts: any[]): number {
-    if (posts.length < 2) return 0;
-    
-    const firstPost = new Date(posts[posts.length - 1].timestamp);
-    const lastPost = new Date(posts[0].timestamp);
-    const daysDiff = (lastPost.getTime() - firstPost.getTime()) / (1000 * 60 * 60 * 24);
-    
-    return posts.length / daysDiff;
-  }
-
-  /**
-   * Calculate average likes per post
-   */
-  private calculateAverageLikes(posts: any[]): number {
-    if (posts.length === 0) return 0;
-    const totalLikes = posts.reduce((sum, post) => sum + post.likeCount, 0);
-    return totalLikes / posts.length;
-  }
-
-  /**
-   * Calculate average comments per post
-   */
-  private calculateAverageComments(posts: any[]): number {
-    if (posts.length === 0) return 0;
-    const totalComments = posts.reduce((sum, post) => sum + post.commentCount, 0);
-    return totalComments / posts.length;
-  }
-
-  /**
-   * Extract most used hashtags
-   */
-  private extractTopHashtags(posts: any[]): string[] {
-    const hashtagCounts = new Map<string, number>();
-    
-    posts.forEach(post => {
-      post.hashtags.forEach((tag: string) => {
-        hashtagCounts.set(tag, (hashtagCounts.get(tag) || 0) + 1);
-      });
-    });
-    
-    return Array.from(hashtagCounts.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10)
-      .map(([tag]) => tag);
-  }
-
-  /**
-   * Analyze content type distribution
-   */
-  private analyzeContentTypes(posts: any[]): CompetitorInsight['contentTypes'] {
-    return posts.reduce((acc, post) => ({
-      images: acc.images + (post.type === 'image' ? 1 : 0),
-      carousels: acc.carousels + (post.type === 'carousel' ? 1 : 0),
-      reels: acc.reels + (post.type === 'reel' ? 1 : 0),
-      stories: acc.stories + (post.type === 'story' ? 1 : 0)
-    }), {
-      images: 0,
-      carousels: 0,
-      reels: 0,
-      stories: 0
-    });
-  }
-
-  /**
-   * Analyze posting time patterns
-   */
-  private analyzePostingTimes(posts: any[]): CompetitorInsight['postingTimes'] {
-    const hourCounts = new Map<number, number>();
-    
-    posts.forEach(post => {
-      const hour = new Date(post.timestamp).getHours();
-      hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
-    });
-    
-    return Array.from(hourCounts.entries())
-      .map(([hour, count]) => ({ hour, count }))
-      .sort((a, b) => b.count - a.count);
-  }
-
-  /**
-   * Calculate engagement rate and trend
-   */
-  private calculateEngagement(posts: any[], followerCount: number): CompetitorInsight['engagement'] {
-    if (posts.length === 0 || !followerCount) {
-      return { rate: 0, trend: 'stable' };
-    }
-    
-    const rates = posts.map(post => 
-      (post.likeCount + post.commentCount) / followerCount * 100
-    );
-    
-    const rate = rates.reduce((sum, rate) => sum + rate, 0) / rates.length;
-    
-    // Calculate trend
-    const recentRates = rates.slice(0, Math.floor(rates.length / 2));
-    const olderRates = rates.slice(Math.floor(rates.length / 2));
-    const recentAvg = recentRates.reduce((sum, rate) => sum + rate, 0) / recentRates.length;
-    const olderAvg = olderRates.reduce((sum, rate) => sum + rate, 0) / olderRates.length;
-    
-    let trend: 'increasing' | 'decreasing' | 'stable';
-    const difference = recentAvg - olderAvg;
-    
-    if (difference > 0.5) {
-      trend = 'increasing';
-    } else if (difference < -0.5) {
-      trend = 'decreasing';
-    } else {
-      trend = 'stable';
-    }
-    
-    return { rate, trend };
-  }
-
-  /**
-   * Generate analysis and recommendations
-   */
-  private async generateAnalysis(insights: CompetitorInsight[]): Promise<CompetitorAnalysis> {
-    const prompt = this.buildAnalysisPrompt(insights);
-    const response = await this.openai.complete(prompt);
-    const recommendations = this.parseRecommendations(response);
-    
-    return {
-      insights,
-      recommendations,
-      timestamp: new Date()
-    };
-  }
-
-  /**
-   * Build prompt for analysis generation
-   */
-  private buildAnalysisPrompt(insights: CompetitorInsight[]): string {
-    return `Analyze the following competitor data and provide strategic recommendations:
-
-Competitor Insights:
-${JSON.stringify(insights, null, 2)}
-
-Please provide recommendations in the following format:
-{
-  "hashtags": ["recommended", "hashtags", "to", "use"],
-  "postingTimes": [best posting hours in 24h format],
-  "contentTypes": ["recommended", "content", "types"],
-  "engagementStrategies": ["strategy1", "strategy2", ...]
-}
-
-Consider:
-1. Most effective hashtags across competitors
-2. Optimal posting times based on engagement
-3. Most successful content types
-4. Engagement patterns and trends
-5. Growth strategies that are working for competitors`;
-  }
-
-  /**
-   * Parse AI recommendations
-   */
-  private parseRecommendations(response: string): CompetitorAnalysis['recommendations'] {
+  private async calculateEngagementRate(username: string): Promise<number> {
     try {
-      return JSON.parse(response);
+      const posts = await this.instagram.getRecentPosts(username, 10);
+      
+      const totalEngagement = posts.reduce((sum, post) => {
+        return sum + post.likeCount + post.commentCount;
+      }, 0);
+
+      const profile = await this.instagram.getProfile(username);
+      const followerCount = profile.followerCount;
+
+      return (totalEngagement / (posts.length * followerCount)) * 100;
     } catch (error) {
-      this.logger.error('Error parsing recommendations', { error, response });
-      throw new Error('Failed to parse competitor analysis recommendations');
+      this.logger.error('Failed to calculate engagement rate', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Get top hashtags
+   */
+  private async getTopHashtags(username: string): Promise<string[]> {
+    try {
+      const posts = await this.instagram.getRecentPosts(username, 50);
+      
+      const hashtagCounts = new Map<string, number>();
+      
+      posts.forEach(post => {
+        post.hashtags.forEach(hashtag => {
+          hashtagCounts.set(hashtag, (hashtagCounts.get(hashtag) || 0) + 1);
+        });
+      });
+
+      return Array.from(hashtagCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([hashtag]) => hashtag);
+    } catch (error) {
+      this.logger.error('Failed to get top hashtags', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Calculate post frequency
+   */
+  private async calculatePostFrequency(username: string): Promise<number> {
+    try {
+      const posts = await this.instagram.getRecentPosts(username, 20);
+      
+      if (posts.length < 2) {
+        return 0;
+      }
+
+      const timestamps = posts.map(post => new Date(post.timestamp).getTime());
+      const timeDiffs = [];
+
+      for (let i = 1; i < timestamps.length; i++) {
+        timeDiffs.push(timestamps[i - 1] - timestamps[i]);
+      }
+
+      const averageTimeDiff = timeDiffs.reduce((sum, diff) => sum + diff, 0) / timeDiffs.length;
+      return Math.round(averageTimeDiff / (1000 * 60 * 60 * 24)); // Convert to days
+    } catch (error) {
+      this.logger.error('Failed to calculate post frequency', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Get best performing content
+   */
+  private async getBestPerformingContent(username: string): Promise<any[]> {
+    try {
+      const posts = await this.instagram.getRecentPosts(username, 50);
+      
+      return posts
+        .sort((a, b) => (b.likeCount + b.commentCount) - (a.likeCount + a.commentCount))
+        .slice(0, 5);
+    } catch (error) {
+      this.logger.error('Failed to get best performing content', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Analyze content
+   */
+  private async analyzeContent(posts: any[]): Promise<ContentAnalysis[]> {
+    try {
+      const analyses: ContentAnalysis[] = [];
+
+      for (const post of posts) {
+        // Analyze images
+        const imageAnalyses = await Promise.all(
+          post.mediaUrls.map(url => this.openai.analyzeImage({ imageUrl: url }))
+        );
+
+        // Generate insights
+        const insights = await this.generateContentInsights(post, imageAnalyses);
+
+        analyses.push({
+          type: post.type,
+          caption: post.caption,
+          hashtags: post.hashtags,
+          likes: post.likeCount,
+          comments: post.commentCount,
+          engagement: post.likeCount + post.commentCount,
+          postedAt: new Date(post.timestamp),
+          mediaUrls: post.mediaUrls,
+          insights
+        });
+      }
+
+      return analyses;
+    } catch (error) {
+      this.logger.error('Failed to analyze content', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Generate content insights
+   */
+  private async generateContentInsights(post: any, imageAnalyses: string[]): Promise<string[]> {
+    try {
+      const prompt = `Analyze this Instagram post and provide key insights:
+        
+        Post Type: ${post.type}
+        Caption: ${post.caption}
+        Hashtags: ${post.hashtags.join(', ')}
+        Engagement: ${post.likeCount} likes, ${post.commentCount} comments
+        
+        Image Analyses:
+        ${imageAnalyses.join('\n')}
+        
+        Provide insights about:
+        1. Content quality and style
+        2. Caption effectiveness
+        3. Hashtag strategy
+        4. Timing and engagement
+        5. Areas for improvement`;
+
+      const response = await this.openai.complete({ prompt });
+      return response.split('\n').filter(Boolean);
+    } catch (error) {
+      this.logger.error('Failed to generate content insights', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Generate recommendations
+   */
+  private async generateRecommendations(profile: CompetitorProfile, analyses: ContentAnalysis[]): Promise<string[]> {
+    try {
+      const prompt = `Based on this competitor analysis, generate strategic recommendations:
+        
+        Profile:
+        ${JSON.stringify(profile, null, 2)}
+        
+        Content Analyses:
+        ${JSON.stringify(analyses, null, 2)}
+        
+        Consider:
+        1. Content strategy improvements
+        2. Engagement optimization
+        3. Hashtag strategy
+        4. Posting schedule
+        5. Growth opportunities
+        
+        Provide specific, actionable recommendations.`;
+
+      const response = await this.openai.complete({ prompt });
+      return response.split('\n').filter(Boolean);
+    } catch (error) {
+      this.logger.error('Failed to generate recommendations', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Identify trends
+   */
+  private async identifyTrends(analyses: ContentAnalysis[]): Promise<any> {
+    try {
+      // Collect hashtags
+      const hashtags = new Map<string, number>();
+      analyses.forEach(analysis => {
+        analysis.hashtags.forEach(hashtag => {
+          hashtags.set(hashtag, (hashtags.get(hashtag) || 0) + 1);
+        });
+      });
+
+      // Analyze topics and styles
+      const topics = new Set<string>();
+      const styles = new Set<string>();
+      analyses.forEach(analysis => {
+        analysis.insights.forEach(insight => {
+          if (insight.toLowerCase().includes('topic:')) {
+            topics.add(insight.split(':')[1].trim());
+          }
+          if (insight.toLowerCase().includes('style:')) {
+            styles.add(insight.split(':')[1].trim());
+          }
+        });
+      });
+
+      // Analyze posting times
+      const timing: { [key: string]: number } = {};
+      analyses.forEach(analysis => {
+        const hour = analysis.postedAt.getHours();
+        timing[hour] = (timing[hour] || 0) + 1;
+      });
+
+      return {
+        hashtags: Array.from(hashtags.entries())
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 20)
+          .map(([hashtag]) => hashtag),
+        topics: Array.from(topics),
+        styles: Array.from(styles),
+        timing
+      };
+    } catch (error) {
+      this.logger.error('Failed to identify trends', { error });
+      throw error;
     }
   }
 }
