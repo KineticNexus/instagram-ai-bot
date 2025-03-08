@@ -41,6 +41,18 @@ interface CompetitorInsights {
   };
 }
 
+interface Post {
+  id: string;
+  type: string;
+  caption: string;
+  hashtags: string[];
+  likeCount: number;
+  commentCount: number;
+  timestamp: string;
+  url: string;
+  mediaUrls: string[];
+}
+
 export class CompetitorAnalyzer {
   constructor(
     private logger: Logger,
@@ -86,7 +98,7 @@ export class CompetitorAnalyzer {
       return insights;
     } catch (error) {
       this.logger.error('Failed to analyze competitors', { error });
-      throw error;
+      throw new Error('Failed to analyze competitors');
     }
   }
 
@@ -124,7 +136,7 @@ export class CompetitorAnalyzer {
       };
     } catch (error) {
       this.logger.error('Failed to analyze profile', { error });
-      throw error;
+      throw new Error('Failed to analyze profile');
     }
   }
 
@@ -140,12 +152,12 @@ export class CompetitorAnalyzer {
       }, 0);
 
       const profile = await this.instagram.getProfile(username);
-      const followerCount = profile.followerCount;
+      const followerCount = profile.followerCount || 1; // Avoid division by zero
 
       return (totalEngagement / (posts.length * followerCount)) * 100;
     } catch (error) {
       this.logger.error('Failed to calculate engagement rate', { error });
-      throw error;
+      return 0;
     }
   }
 
@@ -170,7 +182,7 @@ export class CompetitorAnalyzer {
         .map(([hashtag]) => hashtag);
     } catch (error) {
       this.logger.error('Failed to get top hashtags', { error });
-      throw error;
+      return [];
     }
   }
 
@@ -186,7 +198,7 @@ export class CompetitorAnalyzer {
       }
 
       const timestamps = posts.map(post => new Date(post.timestamp).getTime());
-      const timeDiffs = [];
+      const timeDiffs: number[] = [];
 
       for (let i = 1; i < timestamps.length; i++) {
         timeDiffs.push(timestamps[i - 1] - timestamps[i]);
@@ -196,7 +208,7 @@ export class CompetitorAnalyzer {
       return Math.round(averageTimeDiff / (1000 * 60 * 60 * 24)); // Convert to days
     } catch (error) {
       this.logger.error('Failed to calculate post frequency', { error });
-      throw error;
+      return 0;
     }
   }
 
@@ -212,22 +224,26 @@ export class CompetitorAnalyzer {
         .slice(0, 5);
     } catch (error) {
       this.logger.error('Failed to get best performing content', { error });
-      throw error;
+      return [];
     }
   }
 
   /**
    * Analyze content
    */
-  private async analyzeContent(posts: any[]): Promise<ContentAnalysis[]> {
+  private async analyzeContent(posts: Post[]): Promise<ContentAnalysis[]> {
     try {
       const analyses: ContentAnalysis[] = [];
 
       for (const post of posts) {
-        // Analyze images
-        const imageAnalyses = await Promise.all(
-          post.mediaUrls.map(url => this.openai.analyzeImage({ imageUrl: url }))
+        // Analyze images, handling possible urls
+        const urls = Array.isArray(post.mediaUrls) ? post.mediaUrls : [post.url].filter(Boolean);
+        
+        const imageAnalysesPromises = urls.map(url => 
+          this.openai.analyzeImage({ imageUrl: url }).catch(() => 'Image analysis failed')
         );
+        
+        const imageAnalyses = await Promise.all(imageAnalysesPromises);
 
         // Generate insights
         const insights = await this.generateContentInsights(post, imageAnalyses);
@@ -240,7 +256,7 @@ export class CompetitorAnalyzer {
           comments: post.commentCount,
           engagement: post.likeCount + post.commentCount,
           postedAt: new Date(post.timestamp),
-          mediaUrls: post.mediaUrls,
+          mediaUrls: urls,
           insights
         });
       }
@@ -248,7 +264,7 @@ export class CompetitorAnalyzer {
       return analyses;
     } catch (error) {
       this.logger.error('Failed to analyze content', { error });
-      throw error;
+      throw new Error('Failed to analyze content');
     }
   }
 
@@ -278,7 +294,7 @@ export class CompetitorAnalyzer {
       return response.split('\n').filter(Boolean);
     } catch (error) {
       this.logger.error('Failed to generate content insights', { error });
-      throw error;
+      return ['Could not generate insights due to error'];
     }
   }
 
@@ -287,13 +303,26 @@ export class CompetitorAnalyzer {
    */
   private async generateRecommendations(profile: CompetitorProfile, analyses: ContentAnalysis[]): Promise<string[]> {
     try {
+      // Simplify analyses to avoid token limits
+      const simplifiedAnalyses = analyses.map(a => ({
+        type: a.type,
+        engagement: a.engagement,
+        hashtags: a.hashtags.slice(0, 5),
+        postedAt: a.postedAt.toISOString(),
+        keyInsights: a.insights.slice(0, 3)
+      }));
+
       const prompt = `Based on this competitor analysis, generate strategic recommendations:
         
         Profile:
-        ${JSON.stringify(profile, null, 2)}
+        - Username: ${profile.username}
+        - Followers: ${profile.followerCount}
+        - Engagement Rate: ${profile.engagementRate.toFixed(2)}%
+        - Post Frequency: Every ${profile.postFrequency} days
+        - Top Hashtags: ${profile.topHashtags.join(', ')}
         
-        Content Analyses:
-        ${JSON.stringify(analyses, null, 2)}
+        Content Analysis Summary:
+        ${JSON.stringify(simplifiedAnalyses.slice(0, 5))}
         
         Consider:
         1. Content strategy improvements
@@ -308,7 +337,7 @@ export class CompetitorAnalyzer {
       return response.split('\n').filter(Boolean);
     } catch (error) {
       this.logger.error('Failed to generate recommendations', { error });
-      throw error;
+      return ['Could not generate recommendations due to error'];
     }
   }
 
@@ -331,10 +360,10 @@ export class CompetitorAnalyzer {
       analyses.forEach(analysis => {
         analysis.insights.forEach(insight => {
           if (insight.toLowerCase().includes('topic:')) {
-            topics.add(insight.split(':')[1].trim());
+            topics.add(insight.split(':')[1]?.trim() || '');
           }
           if (insight.toLowerCase().includes('style:')) {
-            styles.add(insight.split(':')[1].trim());
+            styles.add(insight.split(':')[1]?.trim() || '');
           }
         });
       });
@@ -351,13 +380,18 @@ export class CompetitorAnalyzer {
           .sort((a, b) => b[1] - a[1])
           .slice(0, 20)
           .map(([hashtag]) => hashtag),
-        topics: Array.from(topics),
-        styles: Array.from(styles),
+        topics: Array.from(topics).filter(Boolean),
+        styles: Array.from(styles).filter(Boolean),
         timing
       };
     } catch (error) {
       this.logger.error('Failed to identify trends', { error });
-      throw error;
+      return {
+        hashtags: [],
+        topics: [],
+        styles: [],
+        timing: {}
+      };
     }
   }
 }
