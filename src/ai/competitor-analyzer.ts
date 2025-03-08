@@ -41,7 +41,7 @@ interface CompetitorInsights {
   };
 }
 
-interface Post {
+interface PostData {
   id: string;
   type: string;
   caption: string;
@@ -50,7 +50,19 @@ interface Post {
   commentCount: number;
   timestamp: string;
   url: string;
-  mediaUrls: string[];
+  mediaUrls?: string[];
+}
+
+interface ProfileData {
+  username: string;
+  fullName: string;
+  bio: string;
+  website: string;
+  followerCount: number;
+  followingCount: number;
+  postCount: number;
+  isVerified: boolean;
+  isPrivate: boolean;
 }
 
 export class CompetitorAnalyzer {
@@ -215,7 +227,7 @@ export class CompetitorAnalyzer {
   /**
    * Get best performing content
    */
-  private async getBestPerformingContent(username: string): Promise<any[]> {
+  private async getBestPerformingContent(username: string): Promise<PostData[]> {
     try {
       const posts = await this.instagram.getRecentPosts(username, 50);
       
@@ -231,16 +243,16 @@ export class CompetitorAnalyzer {
   /**
    * Analyze content
    */
-  private async analyzeContent(posts: Post[]): Promise<ContentAnalysis[]> {
+  private async analyzeContent(posts: PostData[]): Promise<ContentAnalysis[]> {
     try {
       const analyses: ContentAnalysis[] = [];
 
       for (const post of posts) {
         // Analyze images, handling possible urls
-        const urls = Array.isArray(post.mediaUrls) ? post.mediaUrls : [post.url].filter(Boolean);
+        const urls = post.mediaUrls || [post.url].filter(Boolean);
         
         const imageAnalysesPromises = urls.map(url => 
-          this.openai.analyzeImage({ imageUrl: url }).catch(() => 'Image analysis failed')
+          this.openai.analyzeImage(url, 'Analyze this image in detail, focusing on visual elements, style, content, and potential audience.').catch(() => 'Image analysis failed')
         );
         
         const imageAnalyses = await Promise.all(imageAnalysesPromises);
@@ -271,7 +283,7 @@ export class CompetitorAnalyzer {
   /**
    * Generate content insights
    */
-  private async generateContentInsights(post: any, imageAnalyses: string[]): Promise<string[]> {
+  private async generateContentInsights(post: PostData, imageAnalyses: string[]): Promise<string[]> {
     try {
       const prompt = `Analyze this Instagram post and provide key insights:
         
@@ -288,10 +300,12 @@ export class CompetitorAnalyzer {
         2. Caption effectiveness
         3. Hashtag strategy
         4. Timing and engagement
-        5. Areas for improvement`;
+        5. Areas for improvement
+        
+        Format each insight as a separate point.`;
 
-      const response = await this.openai.complete({ prompt });
-      return response.split('\n').filter(Boolean);
+      const response = await this.openai.generateCompletion(prompt);
+      return response.split('\n').filter(line => line.trim().length > 0);
     } catch (error) {
       this.logger.error('Failed to generate content insights', { error });
       return ['Could not generate insights due to error'];
@@ -333,8 +347,8 @@ export class CompetitorAnalyzer {
         
         Provide specific, actionable recommendations.`;
 
-      const response = await this.openai.complete({ prompt });
-      return response.split('\n').filter(Boolean);
+      const response = await this.openai.generateCompletion(prompt);
+      return response.split('\n').filter(line => line.trim().length > 0);
     } catch (error) {
       this.logger.error('Failed to generate recommendations', { error });
       return ['Could not generate recommendations due to error'];
