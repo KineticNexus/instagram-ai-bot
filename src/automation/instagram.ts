@@ -41,6 +41,13 @@ interface ProfileData {
   isPrivate: boolean;
 }
 
+// Create a mock permission status that matches the PermissionStatus interface
+interface MockPermissionStatus extends PermissionStatus {
+  state: PermissionState;
+  name: string;
+  onchange: ((this: PermissionStatus, ev: Event) => any) | null;
+}
+
 export class InstagramAutomation {
   private page: Page | null = null;
   private rateLimiter: RateLimiter;
@@ -86,15 +93,20 @@ export class InstagramAutomation {
       // Disable notifications
       await this.page.addInitScript(() => {
         window.Notification = { requestPermission: () => Promise.resolve('denied') };
+        
+        // Create a fully compliant PermissionStatus mock
+        const mockPermissionStatus: MockPermissionStatus = {
+          state: 'denied',
+          name: '',
+          onchange: null,
+          addEventListener: function(): void {},
+          removeEventListener: function(): void {},
+          dispatchEvent: function(): boolean { return false; }
+        };
+        
+        // Override the navigator.permissions.query method
         navigator.permissions = {
-          query: () => Promise.resolve({ 
-            state: 'denied',
-            name: '',
-            onchange: null,
-            addEventListener: () => {},
-            removeEventListener: () => {},
-            dispatchEvent: () => false
-          } as PermissionStatus)
+          query: () => Promise.resolve(mockPermissionStatus)
         };
       });
 
@@ -217,17 +229,26 @@ export class InstagramAutomation {
       await this.page.goto(`https://www.instagram.com/${username}/`);
       await this.page.waitForSelector(InstagramSelectors.POST_ITEMS);
 
-      // Extract post data
-      const posts = await this.page.evaluate((selectors: typeof InstagramSelectors) => {
+      // Extract post data with proper type annotations
+      const posts = await this.page.evaluate((selectors) => {
         const postElements = document.querySelectorAll(selectors.POST_ITEMS);
-        const posts: PostData[] = [];
+        const posts: Array<{
+          id: string;
+          type: 'image' | 'carousel' | 'video';
+          caption: string;
+          hashtags: string[];
+          likeCount: number;
+          commentCount: number;
+          timestamp: string;
+          url: string;
+        }> = [];
 
         postElements.forEach((post, index) => {
           if (index >= 12) return;
 
-          const postData: PostData = {
+          const postData = {
             id: post.getAttribute('data-id') || '',
-            type: 'image',
+            type: 'image' as const,
             caption: post.querySelector(selectors.POST_CAPTION)?.textContent || '',
             hashtags: Array.from(post.querySelectorAll(selectors.POST_HASHTAGS))
               .map(tag => tag.textContent || '')
@@ -250,6 +271,10 @@ export class InstagramAutomation {
         return posts;
       }, InstagramSelectors);
 
+      if (!Array.isArray(posts)) {
+        return [];
+      }
+
       return posts.slice(0, limit);
     } catch (error) {
       this.logger.error('Failed to get recent posts', { error });
@@ -271,7 +296,7 @@ export class InstagramAutomation {
       await this.page.goto(`https://www.instagram.com/${username}/`);
       await this.page.waitForSelector(InstagramSelectors.PROFILE_USERNAME);
 
-      return await this.page.evaluate((selectors: typeof InstagramSelectors) => {
+      const profile = await this.page.evaluate((selectors) => {
         return {
           username: document.querySelector(selectors.PROFILE_USERNAME)?.textContent || '',
           fullName: document.querySelector(selectors.PROFILE_FULL_NAME)?.textContent || '',
@@ -280,10 +305,12 @@ export class InstagramAutomation {
           followerCount: parseInt(document.querySelector(selectors.FOLLOWER_COUNT)?.textContent || '0'),
           followingCount: parseInt(document.querySelector(selectors.FOLLOWING_COUNT)?.textContent || '0'),
           postCount: parseInt(document.querySelector(selectors.POST_COUNT)?.textContent || '0'),
-          isVerified: !!document.querySelector(selectors.VERIFIED_BADGE),
-          isPrivate: !!document.querySelector(selectors.PRIVATE_ACCOUNT_INDICATOR)
+          isVerified: Boolean(document.querySelector(selectors.VERIFIED_BADGE)),
+          isPrivate: Boolean(document.querySelector(selectors.PRIVATE_ACCOUNT_INDICATOR))
         };
       }, InstagramSelectors);
+
+      return profile as ProfileData;
     } catch (error) {
       this.logger.error('Failed to get profile information', { error });
       throw error;
