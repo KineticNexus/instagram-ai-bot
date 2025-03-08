@@ -50,25 +50,23 @@ export class ProxyManager {
     try {
       this.logger.info('Initializing proxy manager', { type: config.type });
 
-      switch (config.type) {
-        case 'manual':
-          await this.initializeManualProxy(config.proxies || []);
-          break;
-        case 'api':
-          if (!config.apiUrl || !config.apiKey) {
-            throw new Error('API URL and key are required for API proxy configuration');
-          }
-          await this.initializeApiProxy(config.apiUrl, config.apiKey);
-          break;
-        case 'file':
-          if (!config.filePath) {
-            throw new Error('File path is required for file proxy configuration');
-          }
-          await this.initializeFileProxy(config.filePath);
-          break;
-        default:
-          const exhaustiveCheck: never = config.type;
-          throw new Error(`Invalid proxy configuration type: ${exhaustiveCheck}`);
+      // Type-safe switch statement
+      if (config.type === 'manual') {
+        await this.initializeManualProxy(config.proxies || []);
+      } else if (config.type === 'api') {
+        if (!config.apiUrl || !config.apiKey) {
+          throw new Error('API URL and key are required for API proxy configuration');
+        }
+        await this.initializeApiProxy(config.apiUrl, config.apiKey);
+      } else if (config.type === 'file') {
+        if (!config.filePath) {
+          throw new Error('File path is required for file proxy configuration');
+        }
+        await this.initializeFileProxy(config.filePath);
+      } else {
+        // This ensures exhaustiveness checking
+        const _exhaustiveCheck: never = config.type;
+        throw new Error(`Invalid proxy configuration type: ${config.type}`);
       }
 
       if (config.rotationInterval) {
@@ -145,12 +143,14 @@ export class ProxyManager {
         throw new Error('No proxies returned from API');
       }
 
-      this.proxies = response.data.proxies.map(proxy => ({
-        url: proxy.url,
-        username: proxy.username,
-        password: proxy.password,
-        failCount: 0
-      }));
+      this.proxies = response.data.proxies.map(proxy => {
+        return {
+          url: proxy.url,
+          username: proxy.username,
+          password: proxy.password,
+          failCount: 0
+        };
+      });
     } catch (error) {
       this.logger.error('Failed to initialize API proxies', { error });
       throw error;
@@ -169,12 +169,14 @@ export class ProxyManager {
         throw new Error('Invalid or empty proxy file');
       }
 
-      this.proxies = proxies.map(proxy => ({
-        url: proxy.url,
-        username: proxy.username,
-        password: proxy.password,
-        failCount: 0
-      }));
+      this.proxies = proxies.map(proxy => {
+        return {
+          url: proxy.url,
+          username: proxy.username,
+          password: proxy.password,
+          failCount: 0
+        };
+      });
     } catch (error) {
       this.logger.error('Failed to initialize file proxies', { error });
       throw error;
