@@ -188,7 +188,7 @@ export class ProxyManager {
   /**
    * Get proxy stats
    */
-  getStats(): any {
+  getStats(): Record<string, unknown> {
     return {
       total: this.proxies.length,
       current: this.currentProxyIndex,
