@@ -1,134 +1,119 @@
-import { logger } from './logger';
-import { config } from './config';
-import { Browser, chromium } from 'playwright';
-import { InstagramAutomation } from '../automation/instagram';
+import { Browser } from 'playwright';
+import { chromium } from 'playwright';
+import { Logger } from './logger';
+import { Config } from './config';
+import { Database } from './database';
+import { Scheduler } from './scheduler';
 import { ProxyManager } from '../automation/proxies';
-import { OpenAIClient } from '../api/openai';
-import { AnthropicClient } from '../api/anthropic';
-import { BraveSearchClient } from '../api/brave';
+import { InstagramAutomation } from '../automation/instagram';
 import { DecisionEngine } from '../ai/decision-engine';
 import { ContentGenerator } from '../ai/content-generator';
 import { CompetitorAnalyzer } from '../ai/competitor-analyzer';
-import { AnalyticsService } from '../services/analytics';
+import { OpenAIClient } from '../api/openai';
+import { AnthropicClient } from '../api/anthropic';
+import { BraveSearchClient } from '../api/brave';
 import { ImageProcessor } from '../utils/image-processing';
-import { Repository } from '../database/repository';
-import { Scheduler } from './scheduler';
-import { connectDatabase } from '../database/connection';
+import { AnalyticsService } from '../services/analytics';
 
-/**
- * Main application class
- */
-class Application {
+export class Application {
   private browser: Browser | null = null;
   private instagram: InstagramAutomation | null = null;
   private scheduler: Scheduler | null = null;
   private isRunning = false;
+
+  constructor(
+    private logger: Logger,
+    private config: Config
+  ) {}
 
   /**
    * Initialize the application
    */
   async initialize(): Promise<void> {
     try {
-      logger.info('Initializing application', { version: config.get('app.version') });
+      this.logger.info('Initializing application');
+      this.isRunning = true;
 
       // Connect to database
-      await connectDatabase();
-      logger.info('Connected to database');
+      const database = new Database(this.logger, this.config);
+      await database.connect();
 
-      // Initialize browser
+      // Launch browser
       this.browser = await chromium.launch({
-        headless: true,
-        args: ['--disable-dev-shm-usage']
+        headless: this.config.get('browser.headless'),
+        args: this.config.get('browser.args')
       });
-      logger.info('Browser initialized');
-
-      // Create repository
-      const repository = new Repository();
 
       // Initialize proxy manager
-      const proxyManager = new ProxyManager(
-        logger.child('proxy'),
-        config
-      );
-      await proxyManager.initialize();
+      const proxyManager = new ProxyManager(this.logger, this.config);
+      await proxyManager.initialize({
+        type: this.config.get('proxies.type'),
+        apiUrl: this.config.get('proxies.apiUrl'),
+        apiKey: this.config.get('proxies.apiKey'),
+        filePath: this.config.get('proxies.filePath'),
+        proxies: this.config.get('proxies.list'),
+        rotationInterval: this.config.get('proxies.rotationInterval')
+      });
+
+      // Initialize API clients
+      const openai = new OpenAIClient(this.logger, this.config);
+      const anthropic = new AnthropicClient(this.logger, this.config);
+      const braveSearch = new BraveSearchClient(this.logger, this.config);
+
+      // Initialize services
+      const analytics = new AnalyticsService(this.logger, database);
+      const imageProcessor = new ImageProcessor(this.logger, this.config);
 
       // Initialize Instagram automation
       this.instagram = new InstagramAutomation(
         this.browser,
-        logger.child('instagram'),
+        this.logger,
         proxyManager,
-        config
+        this.config
       );
       await this.instagram.initialize();
 
-      // Initialize API clients
-      const openai = new OpenAIClient(
-        logger.child('openai'),
-        config.get('api.openai.key')
-      );
-
-      const anthropic = new AnthropicClient(
-        logger.child('anthropic'),
-        config.get('api.anthropic.key')
-      );
-
-      const braveSearch = new BraveSearchClient(
-        logger.child('braveSearch'),
-        config.get('api.braveSearch.key')
-      );
-
-      // Initialize utilities
-      const imageProcessor = new ImageProcessor(
-        logger.child('imageProcessor')
-      );
-
-      // Initialize services
-      const analytics = new AnalyticsService(
-        logger.child('analytics'),
-        repository
-      );
-
       // Initialize AI components
       const competitorAnalyzer = new CompetitorAnalyzer(
-        logger.child('competitorAnalyzer'),
-        config,
-        this.instagram,
+        this.logger,
+        this.config,
+        openai,
         braveSearch,
-        repository,
-        openai
+        this.instagram
       );
 
       const contentGenerator = new ContentGenerator(
+        this.logger,
+        this.config,
         openai,
-        logger.child('contentGenerator'),
-        config,
-        imageProcessor,
-        repository
+        anthropic,
+        braveSearch,
+        imageProcessor
       );
 
       const decisionEngine = new DecisionEngine(
+        this.logger,
+        this.config,
         openai,
         anthropic,
-        logger.child('decisionEngine'),
-        config,
-        analytics,
-        competitorAnalyzer
+        braveSearch,
+        analytics
       );
 
       // Initialize scheduler
       this.scheduler = new Scheduler(
-        logger.child('scheduler'),
-        config,
-        repository,
-        decisionEngine
+        this.logger,
+        this.config,
+        decisionEngine,
+        this.instagram
       );
       await this.scheduler.initialize();
 
-      this.isRunning = true;
-      logger.info('Application initialized successfully');
+      this.logger.info('Application initialized successfully');
     } catch (error) {
-      logger.error('Failed to initialize application', { error });
+      this.logger.error('Failed to initialize application', { error });
       await this.shutdown();
+      throw error;
     }
   }
 
@@ -136,27 +121,39 @@ class Application {
    * Shutdown the application
    */
   async shutdown(): Promise<void> {
-    logger.info('Shutting down application');
+    try {
+      this.logger.info('Shutting down application');
 
-    // Close browser if open
-    if (this.browser) {
-      await this.browser.close();
-      this.browser = null;
-      logger.info('Browser closed');
+      // Shutdown scheduler
+      if (this.scheduler) {
+        this.scheduler.shutdown();
+      }
+
+      // Close browser
+      if (this.browser) {
+        await this.browser.close();
+        this.browser = null;
+      }
+
+      this.isRunning = false;
+      this.logger.info('Application shutdown complete');
+    } catch (error) {
+      this.logger.error('Error during application shutdown', { error });
+      this.isRunning = false;
     }
-
-    this.isRunning = false;
-    logger.info('Application shutdown complete');
   }
 }
 
 /**
- * Main function to start the application
+ * Main entry point
  */
-async function main(): Promise<void> {
-  const app = new Application();
-  
-  // Handle process termination signals
+export async function main(): Promise<void> {
+  const logger = new Logger();
+  const config = new Config();
+
+  const app = new Application(logger, config);
+
+  // Handle process termination
   process.on('SIGINT', async () => {
     logger.info('Received SIGINT signal');
     await app.shutdown();
@@ -183,16 +180,10 @@ async function main(): Promise<void> {
     process.exit(1);
   });
 
-  // Initialize application
-  await app.initialize();
-}
-
-// Run the application
-if (require.main === module) {
-  main().catch((error) => {
-    console.error('Fatal error:', error);
+  try {
+    await app.initialize();
+  } catch (error) {
+    logger.error('Application failed to start', { error });
     process.exit(1);
-  });
+  }
 }
-
-export { Application };
