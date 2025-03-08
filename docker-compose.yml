@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: instagram-ai-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./screenshots:/app/screenshots
+      - ./logs:/app/logs
+      - ./temp:/app/temp
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - instagram-ai-network
+
+  mongodb:
+    image: mongo:latest
+    container_name: instagram-ai-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-password}
+    volumes:
+      - mongodb-data:/data/db
+    ports:
+      - "27017:27017"
+    networks:
+      - instagram-ai-network
+
+  redis:
+    image: redis:alpine
+    container_name: instagram-ai-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - instagram-ai-network
+
+networks:
+  instagram-ai-network:
+    driver: bridge
+
+volumes:
+  mongodb-data:
+  redis-data:
