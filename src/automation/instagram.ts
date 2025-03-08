@@ -201,7 +201,7 @@ export class InstagramAutomation {
       await this.page.waitForSelector(InstagramSelectors.POST_ITEMS);
 
       // Extract post data
-      const posts = await this.page.evaluate((selectors: typeof InstagramSelectors, postsNeeded: number) => {
+      const posts = await this.page.evaluate(({ selectors, postsNeeded }: { selectors: typeof InstagramSelectors; postsNeeded: number }) => {
         const postElements = document.querySelectorAll(selectors.POST_ITEMS);
         const posts: PostData[] = [];
 
@@ -231,9 +231,9 @@ export class InstagramAutomation {
         });
 
         return posts;
-      }, InstagramSelectors, limit);
+      }, { selectors: InstagramSelectors, postsNeeded: limit });
 
-      return posts as PostData[];
+      return posts;
     } catch (error) {
       this.logger.error('Failed to get recent posts', { error });
       throw error;
