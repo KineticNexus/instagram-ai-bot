@@ -53,7 +53,7 @@ export class OpenAIClient {
         size: '1024x1024'
       });
 
-      const urls = response.data.map(item => item.url || '').filter(url => url);
+      const urls = response.data.map((item: { url?: string }) => item.url || '').filter((url: string) => url);
       
       if (urls.length === 0) {
         throw new Error('No images generated');
