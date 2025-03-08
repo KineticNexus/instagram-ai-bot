@@ -1,33 +1,62 @@
 import OpenAI from 'openai';
 import { Logger } from '../core/logger';
+import { Config } from '../core/config';
+
+interface CompletionOptions {
+  prompt: string;
+  maxTokens?: number;
+  temperature?: number;
+  model?: string;
+}
+
+interface ImageGenerationOptions {
+  prompt: string;
+  n?: number;
+  size?: '256x256' | '512x512' | '1024x1024';
+  quality?: 'standard' | 'hd';
+  style?: 'vivid' | 'natural';
+}
+
+interface ImageAnalysisOptions {
+  imageUrl: string;
+  prompt?: string;
+  maxTokens?: number;
+}
+
+interface ContentVariationOptions {
+  content: string;
+  n?: number;
+  temperature?: number;
+}
+
+interface ContentImprovementOptions {
+  content: string;
+  feedback: string;
+  temperature?: number;
+}
 
 export class OpenAIClient {
   private client: OpenAI;
 
   constructor(
     private logger: Logger,
-    apiKey: string
+    private config: Config
   ) {
     this.client = new OpenAI({
-      apiKey: apiKey
+      apiKey: this.config.get('openai.apiKey')
     });
   }
 
   /**
    * Generate text completion
    */
-  async complete(prompt: string): Promise<string> {
+  async complete(options: CompletionOptions): Promise<string> {
     try {
       const response = await this.client.chat.completions.create({
-        model: 'gpt-4',
-        messages: [
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.7,
-        max_tokens: 2000
+        model: options.model || 'gpt-4',
+        messages: [{ role: 'user', content: options.prompt }],
+        max_tokens: options.maxTokens || 1000,
+        temperature: options.temperature || 0.7
       });
 
       const completion = response.choices[0]?.message?.content;
@@ -37,39 +66,40 @@ export class OpenAIClient {
 
       return completion;
     } catch (error) {
-      this.logger.error('Text generation failed', { error });
-      throw new Error(`Failed to generate text: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      this.logger.error('Failed to generate completion', { error });
+      throw error;
     }
   }
 
   /**
    * Generate image from text prompt
    */
-  async generateImage(prompt: string): Promise<string[]> {
+  async generateImage(options: ImageGenerationOptions): Promise<string[]> {
     try {
       const response = await this.client.images.generate({
-        prompt: prompt,
-        n: 1,
-        size: '1024x1024'
+        prompt: options.prompt,
+        n: options.n || 1,
+        size: options.size || '1024x1024',
+        quality: options.quality || 'standard',
+        style: options.style || 'vivid'
       });
 
-      const urls = response.data.map((item: { url?: string }) => item.url || '').filter((url: string) => url);
-      
-      if (urls.length === 0) {
+      const imageUrls = response.data.map(image => image.url).filter((url): url is string => url !== null);
+      if (imageUrls.length === 0) {
         throw new Error('No images generated');
       }
 
-      return urls;
+      return imageUrls;
     } catch (error) {
-      this.logger.error('Image generation failed', { error });
-      throw new Error(`Failed to generate image: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      this.logger.error('Failed to generate image', { error });
+      throw error;
     }
   }
 
   /**
-   * Analyze image content
+   * Analyze image content and style
    */
-  async analyzeImage(imageUrl: string): Promise<string> {
+  async analyzeImage(options: ImageAnalysisOptions): Promise<string> {
     try {
       const response = await this.client.chat.completions.create({
         model: 'gpt-4-vision-preview',
@@ -77,12 +107,12 @@ export class OpenAIClient {
           {
             role: 'user',
             content: [
-              { type: 'text', text: 'Analyze this image and describe its content, style, and potential engagement factors.' },
-              { type: 'image_url', image_url: imageUrl }
+              { type: 'text', text: options.prompt || 'Analyze this image in detail.' },
+              { type: 'image_url', image_url: { url: options.imageUrl } }
             ]
           }
         ],
-        max_tokens: 500
+        max_tokens: options.maxTokens || 500
       });
 
       const analysis = response.choices[0]?.message?.content;
@@ -92,57 +122,62 @@ export class OpenAIClient {
 
       return analysis;
     } catch (error) {
-      this.logger.error('Image analysis failed', { error });
-      throw new Error(`Failed to analyze image: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      this.logger.error('Failed to analyze image', { error });
+      throw error;
     }
   }
 
   /**
    * Generate content variations
    */
-  async generateContentVariations(content: string, count: number = 3): Promise<string[]> {
+  async generateContentVariations(options: ContentVariationOptions): Promise<string[]> {
     try {
-      const response = await this.client.chat.completions.create({
-        model: 'gpt-4',
-        messages: [
-          {
-            role: 'user',
-            content: `Generate ${count} unique variations of the following content, maintaining the same message but with different wording and style:\n\n${content}`
-          }
-        ],
-        temperature: 0.8,
-        max_tokens: 2000,
-        n: count
-      });
+      const variations: string[] = [];
+      const n = options.n || 3;
 
-      const variations = response.choices.map(choice => choice.message?.content || '').filter(Boolean);
-      
+      for (let i = 0; i < n; i++) {
+        const response = await this.client.chat.completions.create({
+          model: 'gpt-4',
+          messages: [
+            {
+              role: 'user',
+              content: `Generate a unique variation of the following content, maintaining the same meaning but with different wording and style:\n\n${options.content}`
+            }
+          ],
+          temperature: options.temperature || 0.8
+        });
+
+        const variation = response.choices[0]?.message?.content;
+        if (variation) {
+          variations.push(variation);
+        }
+      }
+
       if (variations.length === 0) {
         throw new Error('No variations generated');
       }
 
       return variations;
     } catch (error) {
-      this.logger.error('Content variation generation failed', { error });
-      throw new Error(`Failed to generate content variations: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      this.logger.error('Failed to generate content variations', { error });
+      throw error;
     }
   }
 
   /**
    * Improve content based on feedback
    */
-  async improveContent(content: string, feedback: string): Promise<string> {
+  async improveContent(options: ContentImprovementOptions): Promise<string> {
     try {
       const response = await this.client.chat.completions.create({
         model: 'gpt-4',
         messages: [
           {
             role: 'user',
-            content: `Improve the following content based on this feedback:\n\nContent:\n${content}\n\nFeedback:\n${feedback}`
+            content: `Here is some content:\n\n${options.content}\n\nImprove this content based on the following feedback:\n${options.feedback}`
           }
         ],
-        temperature: 0.7,
-        max_tokens: 2000
+        temperature: options.temperature || 0.7
       });
 
       const improvedContent = response.choices[0]?.message?.content;
@@ -152,8 +187,8 @@ export class OpenAIClient {
 
       return improvedContent;
     } catch (error) {
-      this.logger.error('Content improvement failed', { error });
-      throw new Error(`Failed to improve content: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      this.logger.error('Failed to improve content', { error });
+      throw error;
     }
   }
 }
