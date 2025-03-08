@@ -76,9 +76,9 @@ export class InstagramAutomation {
         // @ts-ignore
         window.Notification = { requestPermission: () => Promise.resolve('denied') };
         // @ts-ignore
-        navigator.permissions.query = (parameters: any) => (
-          Promise.resolve({ state: 'denied' })
-        );
+        navigator.permissions = {
+          query: () => Promise.resolve({ state: 'denied' })
+        };
       });
 
       this.logger.info('Instagram automation initialized');
