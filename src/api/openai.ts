@@ -84,7 +84,7 @@ export class OpenAIClient {
         style: options.style || 'vivid'
       });
 
-      const imageUrls = response.data.map((image) => image.url).filter((url): url is string => url !== null);
+      const imageUrls = response.data.map((image: { url: string | null }) => image.url).filter((url): url is string => url !== null);
       if (imageUrls.length === 0) {
         throw new Error('No images generated');
       }
