@@ -41,13 +41,6 @@ interface ProfileData {
   isPrivate: boolean;
 }
 
-// Create a mock permission status that matches the PermissionStatus interface
-interface MockPermissionStatus extends PermissionStatus {
-  state: PermissionState;
-  name: string;
-  onchange: ((this: PermissionStatus, ev: Event) => any) | null;
-}
-
 export class InstagramAutomation {
   private page: Page | null = null;
   private rateLimiter: RateLimiter;
@@ -90,24 +83,13 @@ export class InstagramAutomation {
         'User-Agent': this.config.get('instagram.userAgent')
       });
 
-      // Disable notifications
+      // Disable notifications using a safer approach
       await this.page.addInitScript(() => {
-        window.Notification = { requestPermission: () => Promise.resolve('denied') };
-        
-        // Create a fully compliant PermissionStatus mock
-        const mockPermissionStatus: MockPermissionStatus = {
-          state: 'denied',
-          name: '',
-          onchange: null,
-          addEventListener: function(): void {},
-          removeEventListener: function(): void {},
-          dispatchEvent: function(): boolean { return false; }
-        };
-        
-        // Override the navigator.permissions.query method
-        navigator.permissions = {
-          query: () => Promise.resolve(mockPermissionStatus)
-        };
+        // Mock Notification API
+        window.Notification = { 
+          requestPermission: () => Promise.resolve('denied'),
+          permission: 'denied'
+        } as unknown as typeof Notification;
       });
 
       this.logger.info('Instagram automation initialized');
@@ -229,10 +211,10 @@ export class InstagramAutomation {
       await this.page.goto(`https://www.instagram.com/${username}/`);
       await this.page.waitForSelector(InstagramSelectors.POST_ITEMS);
 
-      // Extract post data with proper type annotations
+      // Extract post data - properly typed callback
       const posts = await this.page.evaluate((selectors) => {
         const postElements = document.querySelectorAll(selectors.POST_ITEMS);
-        const posts: Array<{
+        const postsData: Array<{
           id: string;
           type: 'image' | 'carousel' | 'video';
           caption: string;
@@ -243,7 +225,7 @@ export class InstagramAutomation {
           url: string;
         }> = [];
 
-        postElements.forEach((post, index) => {
+        postElements.forEach((post: Element, index: number) => {
           if (index >= 12) return;
 
           const postData = {
@@ -265,20 +247,17 @@ export class InstagramAutomation {
             postData.type = 'carousel';
           }
 
-          posts.push(postData);
+          postsData.push(postData);
         });
 
-        return posts;
+        return postsData;
       }, InstagramSelectors);
 
-      if (!Array.isArray(posts)) {
-        return [];
-      }
-
-      return posts.slice(0, limit);
+      // Ensure we have the correct return type
+      return posts.slice(0, limit) as PostData[];
     } catch (error) {
       this.logger.error('Failed to get recent posts', { error });
-      throw error;
+      return [];
     }
   }
 
