@@ -17,7 +17,7 @@ interface ImageProcessingOptions {
 }
 
 export class ImageProcessor {
-  private sharp: typeof import('sharp');
+  private sharp!: typeof import('sharp').default;
 
   constructor(
     private logger: Logger
@@ -29,7 +29,8 @@ export class ImageProcessor {
   private async initialize(): Promise<void> {
     if (!this.sharp) {
       try {
-        this.sharp = (await import('sharp')).default;
+        const sharpModule = await import('sharp');
+        this.sharp = sharpModule.default;
       } catch (error) {
         this.logger.error('Failed to initialize sharp', { error });
         throw new Error('Failed to initialize image processor');
