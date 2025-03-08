@@ -76,7 +76,7 @@ export class DecisionEngine {
         
         Provide a concise analysis.`;
 
-      const analysis = await this.openai.complete({ prompt });
+      const analysis = await this.openai.generateCompletion(prompt, { model: 'gpt-4' });
       return analysis;
     } catch (error) {
       this.logger.error('Failed to analyze current state', { error });
@@ -103,12 +103,30 @@ export class DecisionEngine {
         - Target (if applicable)
         - Content (if applicable)
         - Reasoning
-        - Confidence score (0-1)`;
+        - Confidence score (0-1)
+        
+        Format the response as a valid JSON array.`;
 
-      const response = await this.openai.complete({ prompt });
+      const response = await this.openai.generateCompletion(prompt, { 
+        model: 'gpt-4',
+        response_format: { type: 'json_object' }
+      });
       
       try {
-        return JSON.parse(response) as Decision[];
+        // The response should be a JSON string that contains an array of decisions
+        const parsedResponse = JSON.parse(response);
+        if (Array.isArray(parsedResponse.options)) {
+          return parsedResponse.options as Decision[];
+        } else if (Array.isArray(parsedResponse)) {
+          return parsedResponse as Decision[];
+        } else {
+          this.logger.warn('Unexpected decision options format', { response });
+          return [{
+            action: 'post',
+            reason: 'Fallback due to parsing error',
+            confidence: 0.5
+          }];
+        }
       } catch (parseError) {
         this.logger.error('Failed to parse decision options', { parseError, response });
         return [{
@@ -192,10 +210,7 @@ export class DecisionEngine {
 
     try {
       // Check content quality
-      const contentAnalysis = await this.openai.analyzeImage({
-        imageUrl: decision.content,
-        prompt: 'Analyze this content for quality and appropriateness for Instagram.'
-      });
+      const contentAnalysis = await this.openai.analyzeImage(decision.content, 'Analyze this content for quality and appropriateness for Instagram.');
 
       // Check optimal posting time
       const currentHour = new Date().getHours();
