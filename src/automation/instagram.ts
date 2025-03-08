@@ -87,7 +87,14 @@ export class InstagramAutomation {
       await this.page.addInitScript(() => {
         window.Notification = { requestPermission: () => Promise.resolve('denied') };
         navigator.permissions = {
-          query: () => Promise.resolve({ state: 'denied' } as PermissionStatus)
+          query: () => Promise.resolve({ 
+            state: 'denied',
+            name: '',
+            onchange: null,
+            addEventListener: () => {},
+            removeEventListener: () => {},
+            dispatchEvent: () => false
+          } as PermissionStatus)
         };
       });
 
