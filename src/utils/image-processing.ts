@@ -1,265 +1,417 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import * as crypto from 'crypto';
+import axios from 'axios';
 import { Logger } from '../core/logger';
-import { promises as fs } from 'fs';
-import path from 'path';
-import { createHash } from 'crypto';
-import type { Sharp } from 'sharp';
+import { Config } from '../core/config';
+
+// Import types for sharp without importing the module
+// This allows TypeScript to check types without requiring sharp at compile time
+type Sharp = any;
+type SharpOptions = any;
 
 interface ImageDimensions {
   width: number;
   height: number;
 }
 
-interface ImageProcessingOptions {
-  quality?: number;
-  format?: 'jpeg' | 'png' | 'webp';
-  width?: number;
-  height?: number;
+interface FilterOptions {
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
+  hue?: number;
+  sepia?: number;
+}
+
+interface TextOverlayOptions {
+  text: string;
+  position?: 'top' | 'bottom' | 'center';
+  fontSize?: number;
+  color?: string;
+  background?: string;
+}
+
+interface CollageOptions {
+  images: string[];
+  columns?: number;
+  spacing?: number;
+  background?: string;
 }
 
 export class ImageProcessor {
-  private sharp!: typeof import('sharp').default;
+  private uploadDir: string;
 
   constructor(
-    private logger: Logger
-  ) {}
-
-  /**
-   * Initialize the image processor
-   */
-  private async initialize(): Promise<void> {
-    if (!this.sharp) {
-      try {
-        const sharpModule = await import('sharp');
-        this.sharp = sharpModule.default;
-      } catch (error) {
-        this.logger.error('Failed to initialize sharp', { error });
-        throw new Error('Failed to initialize image processor');
-      }
-    }
+    private logger: Logger,
+    private config: Config
+  ) {
+    this.uploadDir = this.config.get('uploads.directory') || 'uploads';
+    this.ensureUploadDirectory();
   }
 
   /**
    * Optimize image for Instagram feed
+   * Instagram feed images: max width 1080px, aspect ratio between 4:5 and 1.91:1
    */
-  async optimizeForInstagram(imagePath: string): Promise<Buffer> {
-    await this.initialize();
-
+  async optimizeForInstagram(imageUrl: string): Promise<string> {
     try {
-      const image = this.sharp(imagePath);
-      const metadata = await image.metadata();
+      // Download image if it's a URL
+      const imagePath = await this.downloadImageIfUrl(imageUrl);
+      
+      // Dynamically import sharp to avoid requiring it at compile time
+      const sharp = await this.getSharpModule();
+      
+      // Get image dimensions
+      const metadata = await sharp(imagePath).metadata();
+      const width = metadata.width || 0;
+      const height = metadata.height || 0;
 
-      // Instagram feed image requirements
+      // Calculate optimal dimensions for Instagram
       const maxWidth = 1080;
-      const maxHeight = 1350;
-      const minAspectRatio = 4 / 5;
-      const maxAspectRatio = 1.91;
+      const maxHeight = 1350; // 1080 * 5/4 (for 4:5 aspect ratio)
+      const minHeight = 566; // 1080 / 1.91 (for 1.91:1 aspect ratio)
 
-      // Calculate dimensions
-      const dimensions = this.calculateDimensions({
-        width: metadata.width || 0,
-        height: metadata.height || 0
-      }, {
-        maxWidth,
-        maxHeight,
-        minAspectRatio,
-        maxAspectRatio
-      });
+      const dimensions = this.calculateDimensions(
+        { width, height }, 
+        { maxWidth, maxHeight, minHeight }
+      );
 
-      // Process image
-      return await image
+      // Resize image
+      const resizedImage = sharp(imagePath)
         .resize(dimensions.width, dimensions.height, {
           fit: 'contain',
           background: { r: 255, g: 255, b: 255, alpha: 1 }
-        })
-        .jpeg({
-          quality: 90,
-          progressive: true
-        })
-        .toBuffer();
+        });
+
+      // Save image
+      const outputPath = await this.saveImage(resizedImage, 'instagram');
+
+      return outputPath;
     } catch (error) {
       this.logger.error('Failed to optimize image for Instagram', { error });
-      throw error;
+      throw new Error('Failed to optimize image for Instagram');
     }
   }
 
   /**
    * Optimize image for Instagram story
+   * Instagram stories: 1080px × 1920px (9:16 aspect ratio)
    */
-  async optimizeForInstagramStory(imagePath: string): Promise<Buffer> {
-    await this.initialize();
-
+  async optimizeForInstagramStory(imageUrl: string): Promise<string> {
     try {
-      const image = this.sharp(imagePath);
-      const metadata = await image.metadata();
+      const imagePath = await this.downloadImageIfUrl(imageUrl);
+      const sharp = await this.getSharpModule();
+      
+      const metadata = await sharp(imagePath).metadata();
+      const width = metadata.width || 0;
+      const height = metadata.height || 0;
 
-      // Instagram story requirements
-      const width = 1080;
-      const height = 1920;
-      const aspectRatio = 9 / 16;
+      // Calculate dimensions for Instagram story (9:16 aspect ratio)
+      const targetWidth = 1080;
+      const targetHeight = 1920;
 
-      // Calculate dimensions
-      const dimensions = this.calculateDimensions({
-        width: metadata.width || 0,
-        height: metadata.height || 0
-      }, {
-        targetWidth: width,
-        targetHeight: height,
-        targetAspectRatio: aspectRatio
-      });
+      // Resize and crop to fit the 9:16 aspect ratio
+      const resizedImage = sharp(imagePath)
+        .resize(targetWidth, targetHeight, {
+          fit: 'cover',
+          position: 'center'
+        });
 
-      // Process image
-      return await image
-        .resize(dimensions.width, dimensions.height, {
-          fit: 'contain',
-          background: { r: 255, g: 255, b: 255, alpha: 1 }
-        })
-        .jpeg({
-          quality: 90,
-          progressive: true
-        })
-        .toBuffer();
+      // Save image
+      const outputPath = await this.saveImage(resizedImage, 'story');
+
+      return outputPath;
     } catch (error) {
       this.logger.error('Failed to optimize image for Instagram story', { error });
-      throw error;
+      throw new Error('Failed to optimize image for Instagram story');
     }
   }
 
   /**
-   * Create image collage
+   * Apply filters to image
    */
-  async createCollage(imagePaths: string[], columns: number = 2): Promise<Buffer> {
-    await this.initialize();
-
+  async applyFilters(imageUrl: string, options: FilterOptions): Promise<string> {
     try {
-      const images = await Promise.all(
-        imagePaths.map(async (path) => {
-          const buffer = await fs.readFile(path);
-          return this.sharp(buffer);
-        })
+      const imagePath = await this.downloadImageIfUrl(imageUrl);
+      const sharp = await this.getSharpModule();
+      
+      // Apply filters
+      let filteredImage = sharp(imagePath);
+      
+      if (options.brightness !== undefined) {
+        filteredImage = filteredImage.modulate({ brightness: options.brightness });
+      }
+      
+      if (options.contrast !== undefined) {
+        filteredImage = filteredImage.modulate({ contrast: options.contrast });
+      }
+      
+      if (options.saturation !== undefined) {
+        filteredImage = filteredImage.modulate({ saturation: options.saturation });
+      }
+      
+      if (options.hue !== undefined) {
+        filteredImage = filteredImage.modulate({ hue: options.hue });
+      }
+      
+      if (options.sepia !== undefined) {
+        filteredImage = filteredImage.tint({ r: 112, g: 66, b: 20 });
+      }
+
+      // Save image
+      const outputPath = await this.saveImage(filteredImage, 'filtered');
+
+      return outputPath;
+    } catch (error) {
+      this.logger.error('Failed to apply filters to image', { error });
+      throw new Error('Failed to apply filters to image');
+    }
+  }
+
+  /**
+   * Create a collage from multiple images
+   */
+  async createCollage(options: CollageOptions): Promise<string> {
+    try {
+      const { images, columns = 2, spacing = 10, background = '#ffffff' } = options;
+      
+      // Download all images
+      const imagePaths = await Promise.all(
+        images.map(url => this.downloadImageIfUrl(url))
       );
-
-      const rows = Math.ceil(images.length / columns);
-      const cellWidth = 1080 / columns;
-      const cellHeight = cellWidth;
-
-      const compositeOperations = await Promise.all(
-        images.map(async (image, index) => {
-          const row = Math.floor(index / columns);
-          const col = index % columns;
-
-          const resized = await image
-            .resize(cellWidth, cellHeight, {
-              fit: 'cover',
-              position: 'center'
+      
+      const sharp = await this.getSharpModule();
+      
+      // Get dimensions of all images
+      const imageMetadata = await Promise.all(
+        imagePaths.map(path => sharp(path).metadata())
+      );
+      
+      // Calculate dimensions for each image in the collage
+      const maxWidth = Math.floor(1080 / columns) - spacing;
+      const processedImages = await Promise.all(
+        imagePaths.map(async (path, i) => {
+          const metadata = imageMetadata[i];
+          const width = metadata.width || 0;
+          const height = metadata.height || 0;
+          
+          // Calculate dimensions while maintaining aspect ratio
+          const dimensions = this.calculateDimensions(
+            { width, height },
+            { maxWidth }
+          );
+          
+          // Resize image
+          return sharp(path)
+            .resize(dimensions.width, dimensions.height, {
+              fit: 'contain',
+              background: { r: 255, g: 255, b: 255, alpha: 1 }
             })
             .toBuffer();
-
-          return {
-            input: resized,
-            top: row * cellHeight,
-            left: col * cellWidth
-          };
         })
       );
-
-      return await this.sharp({
+      
+      // Calculate collage dimensions
+      const rows = Math.ceil(images.length / columns);
+      const maxHeight = Math.max(...imageMetadata.map(m => m.height || 0));
+      const collageWidth = columns * maxWidth + (columns + 1) * spacing;
+      const collageHeight = rows * maxHeight + (rows + 1) * spacing;
+      
+      // Create blank canvas
+      const canvas = sharp({
         create: {
-          width: 1080,
-          height: rows * cellHeight,
+          width: collageWidth,
+          height: collageHeight,
           channels: 4,
-          background: { r: 255, g: 255, b: 255, alpha: 1 }
+          background: background
         }
-      })
-      .composite(compositeOperations)
-      .jpeg({
-        quality: 90,
-        progressive: true
-      })
-      .toBuffer();
+      });
+      
+      // Compute positions of each image
+      const compositeOptions = processedImages.map((buffer, i) => {
+        const row = Math.floor(i / columns);
+        const col = i % columns;
+        const x = col * maxWidth + (col + 1) * spacing;
+        const y = row * maxHeight + (row + 1) * spacing;
+        
+        return {
+          input: buffer,
+          left: x,
+          top: y
+        };
+      });
+      
+      // Composite images onto canvas
+      const collage = canvas.composite(compositeOptions);
+      
+      // Save collage
+      const outputPath = await this.saveImage(collage, 'collage');
+      
+      return outputPath;
     } catch (error) {
       this.logger.error('Failed to create collage', { error });
-      throw new Error(`Failed to create collage: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error('Failed to create collage');
+    }
+  }
+
+  /**
+   * Add text overlay to image
+   */
+  async addTextOverlay(imageUrl: string, options: TextOverlayOptions): Promise<string> {
+    try {
+      const imagePath = await this.downloadImageIfUrl(imageUrl);
+      const sharp = await this.getSharpModule();
+      const { text, position = 'bottom', fontSize = 32, color = 'white', background = 'rgba(0,0,0,0.5)' } = options;
+      
+      // Get image dimensions
+      const metadata = await sharp(imagePath).metadata();
+      const width = metadata.width || 0;
+      
+      // Create text overlay
+      const svgText = `
+        <svg width="${width}" height="${fontSize * 2}">
+          <rect width="${width}" height="${fontSize * 2}" fill="${background}"/>
+          <text x="${width / 2}" y="${fontSize + 5}" font-family="Arial" font-size="${fontSize}" fill="${color}" text-anchor="middle">${text}</text>
+        </svg>
+      `;
+      
+      // Compute position
+      let overlayOptions;
+      if (position === 'top') {
+        overlayOptions = { top: 0, left: 0 };
+      } else if (position === 'bottom') {
+        overlayOptions = { top: (metadata.height || 0) - fontSize * 2, left: 0 };
+      } else {
+        overlayOptions = { top: (metadata.height || 0) / 2 - fontSize, left: 0 };
+      }
+      
+      // Add overlay
+      const imageWithOverlay = sharp(imagePath)
+        .composite([{
+          input: Buffer.from(svgText),
+          ...overlayOptions
+        }]);
+      
+      // Save image
+      const outputPath = await this.saveImage(imageWithOverlay, 'overlay');
+      
+      return outputPath;
+    } catch (error) {
+      this.logger.error('Failed to add text overlay', { error });
+      throw new Error('Failed to add text overlay');
     }
   }
 
   /**
    * Save image to disk
    */
-  async saveImage(imageBuffer: Buffer): Promise<string> {
-    try {
-      // Create hash of image data for filename
-      const hash = createHash('md5').update(imageBuffer).digest('hex');
-      const filename = `${hash}.jpg`;
-      const uploadDir = path.join(process.cwd(), 'uploads');
-      const filepath = path.join(uploadDir, filename);
+  private async saveImage(sharpInstance: Sharp, prefix: string): Promise<string> {
+    this.ensureUploadDirectory();
+    
+    // Generate unique filename
+    const hash = crypto.randomBytes(8).toString('hex');
+    const filename = `${prefix}_${hash}.jpg`;
+    const outputPath = path.join(this.uploadDir, filename);
+    
+    // Save image
+    await sharpInstance.jpeg({ quality: 90 }).toFile(outputPath);
+    
+    return outputPath;
+  }
 
-      // Ensure upload directory exists
-      await fs.mkdir(uploadDir, { recursive: true });
-
-      // Save file
-      await fs.writeFile(filepath, imageBuffer);
-
-      return filepath;
-    } catch (error) {
-      this.logger.error('Failed to save image', { error });
-      throw error;
+  /**
+   * Ensure upload directory exists
+   */
+  private ensureUploadDirectory(): void {
+    if (!fs.existsSync(this.uploadDir)) {
+      fs.mkdirSync(this.uploadDir, { recursive: true });
     }
   }
 
   /**
-   * Calculate dimensions while maintaining aspect ratio constraints
+   * Download image if URL
+   */
+  private async downloadImageIfUrl(imageSource: string): Promise<string> {
+    // Check if already a local file path
+    if (fs.existsSync(imageSource)) {
+      return imageSource;
+    }
+    
+    // Download from URL
+    if (imageSource.startsWith('http')) {
+      try {
+        const response = await axios.get(imageSource, { responseType: 'arraybuffer' });
+        const buffer = Buffer.from(response.data, 'binary');
+        
+        // Save to temporary file
+        this.ensureUploadDirectory();
+        const hash = crypto.createHash('md5').update(buffer).digest('hex');
+        const tempPath = path.join(this.uploadDir, `temp_${hash}.jpg`);
+        fs.writeFileSync(tempPath, buffer);
+        
+        return tempPath;
+      } catch (error) {
+        this.logger.error('Failed to download image', { error });
+        throw new Error('Failed to download image');
+      }
+    }
+    
+    return imageSource;
+  }
+
+  /**
+   * Calculate dimensions based on constraints
    */
   private calculateDimensions(
     original: ImageDimensions,
     constraints: {
       maxWidth?: number;
       maxHeight?: number;
-      minAspectRatio?: number;
-      maxAspectRatio?: number;
-      targetWidth?: number;
-      targetHeight?: number;
-      targetAspectRatio?: number;
+      minWidth?: number;
+      minHeight?: number;
     }
   ): ImageDimensions {
-    let { width, height } = original;
-    const aspectRatio = width / height;
-
-    if (constraints.targetAspectRatio) {
-      // Adjust to target aspect ratio
-      if (aspectRatio > constraints.targetAspectRatio) {
-        width = height * constraints.targetAspectRatio;
-      } else {
-        height = width / constraints.targetAspectRatio;
-      }
-    } else {
-      // Adjust to aspect ratio constraints
-      if (constraints.minAspectRatio && aspectRatio < constraints.minAspectRatio) {
-        height = width / constraints.minAspectRatio;
-      } else if (constraints.maxAspectRatio && aspectRatio > constraints.maxAspectRatio) {
-        width = height * constraints.maxAspectRatio;
-      }
+    const { width: originalWidth, height: originalHeight } = original;
+    const { maxWidth, maxHeight, minWidth, minHeight } = constraints;
+    
+    let width = originalWidth;
+    let height = originalHeight;
+    
+    // Apply maximum constraints
+    if (maxWidth && width > maxWidth) {
+      height = Math.round(height * (maxWidth / width));
+      width = maxWidth;
     }
-
-    // Scale down if exceeding maximum dimensions
-    if (constraints.maxWidth && width > constraints.maxWidth) {
-      width = constraints.maxWidth;
-      height = width / aspectRatio;
+    
+    if (maxHeight && height > maxHeight) {
+      width = Math.round(width * (maxHeight / height));
+      height = maxHeight;
     }
-
-    if (constraints.maxHeight && height > constraints.maxHeight) {
-      height = constraints.maxHeight;
-      width = height * aspectRatio;
+    
+    // Apply minimum constraints
+    if (minWidth && width < minWidth) {
+      height = Math.round(height * (minWidth / width));
+      width = minWidth;
     }
-
-    // Scale to target dimensions
-    if (constraints.targetWidth && constraints.targetHeight) {
-      width = constraints.targetWidth;
-      height = constraints.targetHeight;
+    
+    if (minHeight && height < minHeight) {
+      width = Math.round(width * (minHeight / height));
+      height = minHeight;
     }
+    
+    return { width, height };
+  }
 
-    return {
-      width: Math.round(width),
-      height: Math.round(height)
-    };
+  /**
+   * Dynamically import sharp module
+   */
+  private async getSharpModule(): Promise<any> {
+    try {
+      // Use dynamic import for sharp
+      return (await import('sharp')).default;
+    } catch (error) {
+      this.logger.error('Failed to import sharp module', { error });
+      throw new Error('Sharp module is required for image processing');
+    }
   }
 }
