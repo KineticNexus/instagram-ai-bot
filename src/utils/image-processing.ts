@@ -5,10 +5,9 @@ import axios from 'axios';
 import { Logger } from '../core/logger';
 import { Config } from '../core/config';
 
-// Import types for sharp without importing the module
-// This allows TypeScript to check types without requiring sharp at compile time
+// Only use Sharp types, not the actual import
 type Sharp = any;
-type SharpOptions = any;
+type SharpInstance = any;
 
 interface ImageDimensions {
   width: number;
@@ -58,7 +57,7 @@ export class ImageProcessor {
       // Download image if it's a URL
       const imagePath = await this.downloadImageIfUrl(imageUrl);
       
-      // Dynamically import sharp to avoid requiring it at compile time
+      // Dynamically load sharp module
       const sharp = await this.getSharpModule();
       
       // Get image dimensions
@@ -305,7 +304,7 @@ export class ImageProcessor {
   /**
    * Save image to disk
    */
-  private async saveImage(sharpInstance: Sharp, prefix: string): Promise<string> {
+  private async saveImage(sharpInstance: SharpInstance, prefix: string): Promise<string> {
     this.ensureUploadDirectory();
     
     // Generate unique filename
@@ -407,11 +406,10 @@ export class ImageProcessor {
    */
   private async getSharpModule(): Promise<any> {
     try {
-      // Use dynamic import for sharp
-      return (await import('sharp')).default;
+      return await import('sharp').then(module => module.default);
     } catch (error) {
       this.logger.error('Failed to import sharp module', { error });
-      throw new Error('Sharp module is required for image processing');
+      throw new Error('Sharp module is required for image processing. Please install it with: npm install sharp');
     }
   }
 }
