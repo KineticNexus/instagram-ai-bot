@@ -29,6 +29,18 @@ interface PostData {
   url: string;
 }
 
+interface ProfileData {
+  username: string;
+  fullName: string;
+  bio: string;
+  website: string;
+  followerCount: number;
+  followingCount: number;
+  postCount: number;
+  isVerified: boolean;
+  isPrivate: boolean;
+}
+
 export class InstagramAutomation {
   private page: Page | null = null;
   private rateLimiter: RateLimiter;
@@ -73,11 +85,9 @@ export class InstagramAutomation {
 
       // Disable notifications
       await this.page.addInitScript(() => {
-        // @ts-ignore
         window.Notification = { requestPermission: () => Promise.resolve('denied') };
-        // @ts-ignore
         navigator.permissions = {
-          query: () => Promise.resolve({ state: 'denied' })
+          query: () => Promise.resolve({ state: 'denied' } as PermissionStatus)
         };
       });
 
@@ -201,12 +211,12 @@ export class InstagramAutomation {
       await this.page.waitForSelector(InstagramSelectors.POST_ITEMS);
 
       // Extract post data
-      const posts = await this.page.evaluate(({ selectors, postsNeeded }: { selectors: typeof InstagramSelectors; postsNeeded: number }) => {
+      const posts = await this.page.evaluate((selectors: typeof InstagramSelectors) => {
         const postElements = document.querySelectorAll(selectors.POST_ITEMS);
         const posts: PostData[] = [];
 
         postElements.forEach((post, index) => {
-          if (index >= postsNeeded) return;
+          if (index >= 12) return;
 
           const postData: PostData = {
             id: post.getAttribute('data-id') || '',
@@ -231,9 +241,9 @@ export class InstagramAutomation {
         });
 
         return posts;
-      }, { selectors: InstagramSelectors, postsNeeded: limit });
+      }, InstagramSelectors);
 
-      return posts;
+      return posts.slice(0, limit);
     } catch (error) {
       this.logger.error('Failed to get recent posts', { error });
       throw error;
@@ -243,7 +253,7 @@ export class InstagramAutomation {
   /**
    * Get profile information
    */
-  async getProfile(username: string): Promise<any> {
+  async getProfile(username: string): Promise<ProfileData> {
     if (!this.page || !this.isLoggedIn) {
       throw new Error('Not logged in');
     }
