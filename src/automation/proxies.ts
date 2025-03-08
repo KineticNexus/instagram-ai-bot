@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { AxiosRequestConfig } from 'axios';
 import fs from 'fs/promises';
 import { Logger } from '../core/logger';
 import { Config } from '../core/config';
@@ -11,6 +11,7 @@ interface Proxy {
   failCount?: number;
 }
 
+// Define a proper union type for proxy types
 type ProxyType = 'manual' | 'api' | 'file';
 
 interface ProxyConfig {
@@ -66,7 +67,8 @@ export class ProxyManager {
           await this.initializeFileProxy(config.filePath);
           break;
         default:
-          throw new Error(`Invalid proxy configuration type: ${config.type}`);
+          const exhaustiveCheck: never = config.type;
+          throw new Error(`Invalid proxy configuration type: ${exhaustiveCheck}`);
       }
 
       if (config.rotationInterval) {
@@ -133,9 +135,11 @@ export class ProxyManager {
    */
   private async initializeApiProxy(apiUrl: string, apiKey: string): Promise<void> {
     try {
-      const response = await axios.get<{ proxies: Proxy[] }>(apiUrl, {
+      const config: AxiosRequestConfig = {
         headers: { 'Authorization': `Bearer ${apiKey}` }
-      });
+      };
+
+      const response = await axios.get<{ proxies: Proxy[] }>(apiUrl, config);
 
       if (!response.data.proxies || response.data.proxies.length === 0) {
         throw new Error('No proxies returned from API');
