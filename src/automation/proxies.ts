@@ -1,59 +1,79 @@
+import axios from 'axios';
+import fs from 'fs/promises';
 import { Logger } from '../core/logger';
 import { Config } from '../core/config';
-import axios from 'axios';
-import { promises as fs } from 'fs';
 
 interface Proxy {
   url: string;
   username?: string;
   password?: string;
-  country?: string;
   lastUsed?: Date;
+  failCount?: number;
 }
 
-type ProxyType = 'none' | 'manual' | 'api' | 'file';
+interface ProxyConfig {
+  type: 'manual' | 'api' | 'file';
+  apiUrl?: string;
+  apiKey?: string;
+  filePath?: string;
+  proxies?: Proxy[];
+  rotationInterval?: number;
+}
+
+interface ProxyStats {
+  totalProxies: number;
+  activeProxies: number;
+  failedProxies: number;
+  lastRotation: Date | null;
+}
 
 export class ProxyManager {
   private proxies: Proxy[] = [];
-  private currentProxyIndex = 0;
-  private lastRotation = new Date();
+  private currentIndex = 0;
+  private lastRotation: Date | null = null;
+  private rotationInterval: number;
 
   constructor(
     private logger: Logger,
     private config: Config
-  ) {}
+  ) {
+    this.rotationInterval = config.get('proxies.rotationInterval') || 3600000; // 1 hour default
+  }
 
   /**
    * Initialize proxy manager
    */
-  async initialize(): Promise<void> {
+  async initialize(config: ProxyConfig): Promise<void> {
     try {
-      const proxyType = this.config.get<ProxyType>('proxy.type');
-      
-      switch (proxyType) {
-        case 'none':
-          this.logger.info('No proxy configuration');
-          break;
-          
+      this.logger.info('Initializing proxy manager', { type: config.type });
+
+      switch (config.type) {
         case 'manual':
-          await this.initializeManualProxy();
+          await this.initializeManualProxy(config.proxies || []);
           break;
-          
         case 'api':
-          await this.initializeApiProxy();
+          if (!config.apiUrl || !config.apiKey) {
+            throw new Error('API URL and key are required for API proxy configuration');
+          }
+          await this.initializeApiProxy(config.apiUrl, config.apiKey);
           break;
-          
         case 'file':
-          await this.initializeFileProxy();
+          if (!config.filePath) {
+            throw new Error('File path is required for file proxy configuration');
+          }
+          await this.initializeFileProxy(config.filePath);
           break;
-          
         default:
-          throw new Error(`Invalid proxy type: ${proxyType}`);
+          throw new Error(`Invalid proxy configuration type: ${config.type}`);
       }
-      
+
+      if (config.rotationInterval) {
+        this.rotationInterval = config.rotationInterval;
+      }
+
       this.logger.info('Proxy manager initialized', {
-        type: proxyType,
-        count: this.proxies.length
+        proxyCount: this.proxies.length,
+        rotationInterval: this.rotationInterval
       });
     } catch (error) {
       this.logger.error('Failed to initialize proxy manager', { error });
@@ -66,91 +86,85 @@ export class ProxyManager {
    */
   async getProxy(): Promise<Proxy> {
     if (this.proxies.length === 0) {
-      return {
-        url: 'direct://'
-      };
+      throw new Error('No proxies available');
     }
-    
-    // Check if we need to rotate proxies
-    const now = new Date();
-    const rotationInterval = this.config.get<number>('proxy.rotationInterval') * 1000;
-    
-    if (now.getTime() - this.lastRotation.getTime() >= rotationInterval) {
-      await this.rotateProxies();
-    }
-    
-    // Get next proxy
-    const proxy = this.proxies[this.currentProxyIndex];
-    proxy.lastUsed = new Date();
-    
-    // Update index for next time
-    this.currentProxyIndex = (this.currentProxyIndex + 1) % this.proxies.length;
-    
-    return proxy;
-  }
 
-  /**
-   * Initialize manual proxy configuration
-   */
-  private async initializeManualProxy(): Promise<void> {
-    const proxy: Proxy = {
-      url: this.config.get('proxy.url'),
-      username: this.config.get('proxy.username'),
-      password: this.config.get('proxy.password')
-    };
-    
-    this.proxies = [proxy];
-  }
-
-  /**
-   * Initialize API-based proxy configuration
-   */
-  private async initializeApiProxy(): Promise<void> {
     try {
-      const apiUrl = this.config.get<string>('proxy.apiUrl');
-      const apiKey = this.config.get<string>('proxy.apiKey');
-      
-      const response = await axios.get<Proxy[]>(apiUrl, {
-        headers: {
-          'Authorization': `Bearer ${apiKey}`
-        }
-      });
-      
-      if (!response.data || !Array.isArray(response.data)) {
-        throw new Error('Invalid proxy API response');
+      // Check if rotation is needed
+      const now = new Date();
+      if (this.lastRotation && (now.getTime() - this.lastRotation.getTime() > this.rotationInterval)) {
+        await this.rotateProxies();
       }
-      
-      this.proxies = response.data.map(proxy => ({
-        url: proxy.url,
-        username: proxy.username,
-        password: proxy.password,
-        country: proxy.country
-      }));
+
+      // Get next proxy
+      const proxy = this.proxies[this.currentIndex];
+      proxy.lastUsed = new Date();
+
+      // Update index
+      this.currentIndex = (this.currentIndex + 1) % this.proxies.length;
+
+      return proxy;
     } catch (error) {
-      this.logger.error('Failed to initialize API proxy', { error });
+      this.logger.error('Failed to get proxy', { error });
       throw error;
     }
   }
 
   /**
-   * Initialize file-based proxy configuration
+   * Initialize manual proxy configuration
    */
-  private async initializeFileProxy(): Promise<void> {
+  private async initializeManualProxy(proxies: Proxy[]): Promise<void> {
+    if (proxies.length === 0) {
+      throw new Error('No proxies provided for manual configuration');
+    }
+
+    this.proxies = proxies.map(proxy => ({
+      ...proxy,
+      failCount: 0
+    }));
+  }
+
+  /**
+   * Initialize API proxy configuration
+   */
+  private async initializeApiProxy(apiUrl: string, apiKey: string): Promise<void> {
     try {
-      const filePath = this.config.get<string>('proxy.file');
-      const content = await fs.readFile(filePath, 'utf-8');
-      const lines = content.split('\n').filter(line => line.trim());
-      
-      this.proxies = lines.map(line => {
-        const [url, username, password] = line.split(',').map(s => s.trim());
-        return {
-          url,
-          username,
-          password
-        };
+      const response = await axios.get<{ proxies: Proxy[] }>(apiUrl, {
+        headers: { 'Authorization': `Bearer ${apiKey}` }
       });
+
+      if (!response.data.proxies || response.data.proxies.length === 0) {
+        throw new Error('No proxies returned from API');
+      }
+
+      this.proxies = response.data.proxies.map(proxy => ({
+        ...proxy,
+        failCount: 0
+      }));
     } catch (error) {
-      this.logger.error('Failed to initialize file proxy', { error });
+      this.logger.error('Failed to initialize API proxies', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Initialize file proxy configuration
+   */
+  private async initializeFileProxy(filePath: string): Promise<void> {
+    try {
+      const fileContent = await fs.readFile(filePath, 'utf-8');
+      const proxies = JSON.parse(fileContent) as Proxy[];
+
+      if (!Array.isArray(proxies) || proxies.length === 0) {
+        throw new Error('Invalid or empty proxy file');
+      }
+
+      this.proxies = proxies.map(proxy => ({
+        ...proxy,
+        failCount: 0
+      }));
+    } catch (error) {
+      this.logger.error('Failed to initialize file proxies', { error });
       throw error;
     }
   }
@@ -160,25 +174,18 @@ export class ProxyManager {
    */
   private async rotateProxies(): Promise<void> {
     try {
-      const proxyType = this.config.get<ProxyType>('proxy.type');
-      
-      if (proxyType === 'api') {
-        // Refresh proxies from API
-        await this.initializeApiProxy();
-      }
-      
+      this.logger.info('Rotating proxies');
+
       // Shuffle proxies
       for (let i = this.proxies.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [this.proxies[i], this.proxies[j]] = [this.proxies[j], this.proxies[i]];
       }
-      
-      this.currentProxyIndex = 0;
+
       this.lastRotation = new Date();
-      
-      this.logger.info('Proxies rotated', {
-        count: this.proxies.length
-      });
+      this.currentIndex = 0;
+
+      this.logger.info('Proxies rotated successfully');
     } catch (error) {
       this.logger.error('Failed to rotate proxies', { error });
       throw error;
@@ -186,14 +193,14 @@ export class ProxyManager {
   }
 
   /**
-   * Get proxy stats
+   * Get proxy statistics
    */
-  getStats(): Record<string, unknown> {
+  getStats(): ProxyStats {
     return {
-      total: this.proxies.length,
-      current: this.currentProxyIndex,
-      lastRotation: this.lastRotation,
-      type: this.config.get<ProxyType>('proxy.type')
+      totalProxies: this.proxies.length,
+      activeProxies: this.proxies.filter(p => !p.failCount || p.failCount < 3).length,
+      failedProxies: this.proxies.filter(p => p.failCount && p.failCount >= 3).length,
+      lastRotation: this.lastRotation
     };
   }
 }
