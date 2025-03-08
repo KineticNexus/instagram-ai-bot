@@ -120,10 +120,13 @@ export class Scheduler {
           
           if (jobInfo) {
             jobInfo.status = 'completed';
-            const scheduledTask = jobInfo.task;
-            if (scheduledTask && scheduledTask.nextInvocation) {
-              // Use toJSDate instead of toDate for Luxon DateTime
-              jobInfo.nextRun = scheduledTask.nextInvocation();
+            
+            // Get next run time if available
+            const task = jobInfo.task;
+            if (task && task.nextInvocation) {
+              const nextInvocation = task.nextInvocation();
+              // Convert to Date using Luxon's toJSDate (not toDate)
+              jobInfo.nextRun = nextInvocation ? nextInvocation.toJSDate() : null;
             }
           }
         } catch (error) {
@@ -136,9 +139,10 @@ export class Scheduler {
         }
       });
 
-      // Store job information
-      const nextRun = job.nextInvocation ? job.nextInvocation() : null;
+      // Get initial next run time
+      const nextRun = job.nextInvocation ? job.nextInvocation().toJSDate() : null;
 
+      // Store job information
       this.jobs.set(name, {
         name,
         schedule: cronExpression,
