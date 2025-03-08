@@ -2,52 +2,42 @@
   "name": "instagram-ai-bot",
   "version": "1.0.0",
   "description": "AI-powered Instagram automation tool",
-  "main": "dist/core/index.js",
+  "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/core/index.js",
-    "dev": "ts-node src/core/index.ts",
-    "test": "jest",
-    "lint": "eslint . --ext .ts",
-    "task:post-content": "ts-node src/tasks/post-content.ts",
-    "task:analyze-competitors": "ts-node src/tasks/analyze-competitors.ts",
-    "task:engage-followers": "ts-node src/tasks/engage-followers.ts",
-    "task:generate-content": "ts-node src/tasks/generate-content.ts"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.17.1",
-    "@types/node": "^20.11.19",
-    "axios": "^1.6.7",
-    "dotenv": "^16.4.4",
-    "openai": "^4.28.0",
-    "playwright": "^1.41.2",
-    "sharp": "^0.33.2",
-    "winston": "^3.11.0"
-  },
-  "devDependencies": {
-    "@types/jest": "^29.5.12",
-    "@typescript-eslint/eslint-plugin": "^7.0.1",
-    "@typescript-eslint/parser": "^7.0.1",
-    "eslint": "^8.56.0",
-    "jest": "^29.7.0",
-    "ts-jest": "^29.1.2",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.3.3"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/KineticNexus/instagram-ai-bot.git"
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "test": "jest"
   },
   "keywords": [
     "instagram",
-    "automation",
     "ai",
-    "bot",
-    "social-media"
+    "automation",
+    "bot"
   ],
-  "author": "KineticNexus",
-  "license": "MIT"
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.5",
+    "dotenv": "^16.0.3",
+    "luxon": "^3.3.0",
+    "node-schedule": "^2.1.1",
+    "openai": "^4.20.0",
+    "playwright": "^1.40.0",
+    "sharp": "^0.33.0",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@types/luxon": "^3.3.0",
+    "@types/node": "^20.9.0",
+    "@types/node-schedule": "^2.1.0",
+    "jest": "^29.5.0",
+    "ts-jest": "^29.1.0",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.2.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
