@@ -67,7 +67,7 @@ export class OpenAIClient {
       return completion;
     } catch (error) {
       this.logger.error('Failed to generate completion', { error });
-      throw error;
+      throw new Error('Failed to generate completion');
     }
   }
 
@@ -92,7 +92,7 @@ export class OpenAIClient {
       return imageUrls;
     } catch (error) {
       this.logger.error('Failed to generate image', { error });
-      throw error;
+      throw new Error('Failed to generate image');
     }
   }
 
@@ -123,7 +123,7 @@ export class OpenAIClient {
       return analysis;
     } catch (error) {
       this.logger.error('Failed to analyze image', { error });
-      throw error;
+      throw new Error('Failed to analyze image');
     }
   }
 
@@ -160,7 +160,7 @@ export class OpenAIClient {
       return variations;
     } catch (error) {
       this.logger.error('Failed to generate content variations', { error });
-      throw error;
+      throw new Error('Failed to generate content variations');
     }
   }
 
@@ -188,7 +188,7 @@ export class OpenAIClient {
       return improvedContent;
     } catch (error) {
       this.logger.error('Failed to improve content', { error });
-      throw error;
+      throw new Error('Failed to improve content');
     }
   }
 }
