@@ -2,6 +2,7 @@ import { Logger } from '../core/logger';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
+import type { Sharp } from 'sharp';
 
 interface ImageDimensions {
   width: number;
