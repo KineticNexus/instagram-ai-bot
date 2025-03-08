@@ -110,7 +110,7 @@ export class ProxyManager {
       const apiUrl = this.config.get<string>('proxy.apiUrl');
       const apiKey = this.config.get<string>('proxy.apiKey');
       
-      const response = await axios.get(apiUrl, {
+      const response = await axios.get<Proxy[]>(apiUrl, {
         headers: {
           'Authorization': `Bearer ${apiKey}`
         }
