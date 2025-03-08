@@ -54,7 +54,7 @@ export class DecisionEngine {
       return decision;
     } catch (error) {
       this.logger.error('Failed to make decision', { error });
-      throw error;
+      throw new Error('Failed to make decision');
     }
   }
 
@@ -80,7 +80,7 @@ export class DecisionEngine {
       return analysis;
     } catch (error) {
       this.logger.error('Failed to analyze current state', { error });
-      throw error;
+      throw new Error('Failed to analyze current state');
     }
   }
 
@@ -106,10 +106,20 @@ export class DecisionEngine {
         - Confidence score (0-1)`;
 
       const response = await this.openai.complete({ prompt });
-      return JSON.parse(response) as Decision[];
+      
+      try {
+        return JSON.parse(response) as Decision[];
+      } catch (parseError) {
+        this.logger.error('Failed to parse decision options', { parseError, response });
+        return [{
+          action: 'post',
+          reason: 'Fallback due to parsing error',
+          confidence: 0.5
+        }];
+      }
     } catch (error) {
       this.logger.error('Failed to generate decision options', { error });
-      throw error;
+      throw new Error('Failed to generate decision options');
     }
   }
 
@@ -133,7 +143,7 @@ export class DecisionEngine {
       return bestOption;
     } catch (error) {
       this.logger.error('Failed to evaluate options', { error });
-      throw error;
+      throw new Error('Failed to evaluate options');
     }
   }
 
