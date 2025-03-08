@@ -1,441 +1,365 @@
 import { Browser, Page } from 'playwright';
 import { Logger } from '../core/logger';
+import { Config } from '../core/config';
 import { ProxyManager } from './proxies';
 import { InstagramSelectors } from './selectors';
-import { ImageProcessor } from '../utils/image-processing';
 import { RateLimiter } from '../utils/rate-limiter';
-import { Config } from '../core/config';
+
+interface LoginOptions {
+  username: string;
+  password: string;
+  twoFactorCode?: string;
+}
+
+interface PostOptions {
+  mediaUrls: string[];
+  caption: string;
+  hashtags: string[];
+  location?: string;
+}
+
+interface PostData {
+  id: string;
+  type: 'image' | 'carousel' | 'video';
+  caption: string;
+  hashtags: string[];
+  likeCount: number;
+  commentCount: number;
+  timestamp: string;
+  url: string;
+}
 
 export class InstagramAutomation {
-  private browser: Browser;
   private page: Page | null = null;
-  private logger: Logger;
-  private proxyManager: ProxyManager;
   private rateLimiter: RateLimiter;
-  private config: Config;
-  private isLoggedIn: boolean = false;
-  
+  private isLoggedIn = false;
+
   constructor(
-    browser: Browser, 
-    logger: Logger, 
-    proxyManager: ProxyManager,
-    config: Config
+    private browser: Browser,
+    private logger: Logger,
+    private proxyManager: ProxyManager,
+    private config: Config
   ) {
-    this.browser = browser;
-    this.logger = logger;
-    this.proxyManager = proxyManager;
-    this.config = config;
     this.rateLimiter = new RateLimiter({
-      maxRequests: this.config.get('rateLimit.instagram.maxRequests', 100),
-      timeWindow: this.config.get('rateLimit.instagram.timeWindow', 3600)
+      maxRequests: config.get('instagram.limits.requestsPerHour'),
+      timeWindow: 3600, // 1 hour
+      minDelay: 1000,  // 1 second
+      maxDelay: 5000   // 5 seconds
     });
   }
-  
+
+  /**
+   * Initialize automation
+   */
   async initialize(): Promise<void> {
     try {
-      // Rotate proxy if needed
-      const useProxy = this.config.get('proxy.use', false);
-      const proxy = useProxy ? await this.proxyManager.getNextProxy() : null;
-      
-      // Create new browser context with proxy
-      const contextOptions: any = {
-        userAgent: this.config.get('browser.userAgent'),
-        viewport: { width: 1280, height: 800 },
-        deviceScaleFactor: 1,
-        hasTouch: false,
-        locale: 'en-US',
-        timezoneId: this.config.get('browser.timezoneId')
-      };
-      
-      if (proxy) {
-        contextOptions.proxy = {
+      // Create new page with proxy
+      const proxy = await this.proxyManager.getProxy();
+      const context = await this.browser.newContext({
+        proxy: {
           server: proxy.url,
           username: proxy.username,
           password: proxy.password
-        };
-      }
-      
-      const context = await this.browser.newContext(contextOptions);
-      
-      // Create new page
-      this.page = await context.newPage();
-      
-      // Set various browser fingerprints to avoid detection
-      await this.page.addInitScript(() => {
-        // Override navigator properties
-        Object.defineProperty(navigator, 'webdriver', { get: () => false });
-        
-        // Add language strings
-        Object.defineProperty(navigator, 'languages', {
-          get: () => ['en-US', 'en', 'es']
-        });
-        
-        // Add fake plugins
-        Object.defineProperty(navigator, 'plugins', {
-          get: () => {
-            const plugins = [];
-            for (let i = 0; i < 5; i++) {
-              plugins.push({
-                name: `Plugin ${i}`,
-                description: `Fake plugin ${i}`,
-                filename: `plugin${i}.dll`
-              });
-            }
-            return plugins;
-          }
-        });
-        
-        // Override permissions
-        if (navigator.permissions) {
-          const originalQuery = navigator.permissions.query;
-          // @ts-ignore
-          navigator.permissions.query = (parameters: any) => (
-            parameters.name === 'notifications' ?
-              Promise.resolve({ state: Notification.permission }) :
-              originalQuery(parameters)
-          );
         }
       });
-      
-      this.logger.info('Instagram automation initialized with new browser context');
+
+      this.page = await context.newPage();
+
+      // Set user agent and viewport
+      await this.page.setViewportSize({ width: 1280, height: 800 });
+      await this.page.setExtraHTTPHeaders({
+        'User-Agent': this.config.get('instagram.userAgent')
+      });
+
+      // Disable notifications
+      await this.page.addInitScript(() => {
+        // @ts-ignore
+        window.Notification = { requestPermission: () => Promise.resolve('denied') };
+        // @ts-ignore
+        navigator.permissions.query = (parameters: any) => (
+          Promise.resolve({ state: 'denied' })
+        );
+      });
+
+      this.logger.info('Instagram automation initialized');
     } catch (error) {
       this.logger.error('Failed to initialize Instagram automation', { error });
       throw error;
     }
   }
-  
-  async login(username?: string, password?: string): Promise<boolean> {
+
+  /**
+   * Login to Instagram
+   */
+  async login(options: LoginOptions): Promise<void> {
     if (!this.page) {
-      throw new Error('Browser page not initialized');
+      throw new Error('Page not initialized');
     }
-    
+
     try {
       await this.rateLimiter.wait();
-      
-      // Use provided credentials or load from config
-      const instagramUsername = username || this.config.get('instagram.username');
-      const instagramPassword = password || this.config.get('instagram.password');
-      
-      if (!instagramUsername || !instagramPassword) {
-        throw new Error('Instagram credentials not provided');
+
+      // Navigate to login page
+      await this.page.goto('https://www.instagram.com/accounts/login/');
+      await this.page.waitForLoadState('networkidle');
+
+      // Accept cookies if prompted
+      const acceptCookiesButton = await this.page.$(InstagramSelectors.ACCEPT_COOKIES_BUTTON);
+      if (acceptCookiesButton) {
+        await acceptCookiesButton.click();
       }
-      
-      // Navigate to Instagram login page
-      await this.page.goto('https://www.instagram.com/accounts/login/', {
-        waitUntil: 'networkidle'
-      });
-      
-      // Accept cookies if dialog appears
-      const cookieSelector = InstagramSelectors.ACCEPT_COOKIES_BUTTON;
-      const cookieButton = await this.page.$(cookieSelector);
-      if (cookieButton) {
-        await cookieButton.click();
-        await this.page.waitForTimeout(2000);
-      }
-      
-      // Type username and password
-      await this.page.fill(InstagramSelectors.USERNAME_INPUT, instagramUsername);
-      await this.page.waitForTimeout(500 + Math.random() * 500);
-      await this.page.fill(InstagramSelectors.PASSWORD_INPUT, instagramPassword);
-      
-      // Add random delay to simulate human behavior
-      await this.page.waitForTimeout(Math.floor(Math.random() * 1000) + 500);
-      
-      // Click login button
+
+      // Enter credentials
+      await this.page.fill(InstagramSelectors.USERNAME_INPUT, options.username);
+      await this.page.fill(InstagramSelectors.PASSWORD_INPUT, options.password);
       await this.page.click(InstagramSelectors.LOGIN_BUTTON);
-      
-      // Wait for navigation
-      await this.page.waitForNavigation({ waitUntil: 'networkidle' });
-      
-      // Handle two-factor authentication if enabled
-      if (await this.page.$(InstagramSelectors.TWO_FACTOR_INPUT)) {
-        this.logger.warn('Two-factor authentication detected');
-        // Get 2FA code from config, SMS service, or other source
-        const twoFactorCode = await this.getTwoFactorCode();
-        await this.page.fill(InstagramSelectors.TWO_FACTOR_INPUT, twoFactorCode);
+
+      // Handle two-factor authentication
+      if (options.twoFactorCode) {
+        await this.page.waitForSelector(InstagramSelectors.TWO_FACTOR_INPUT);
+        await this.page.fill(InstagramSelectors.TWO_FACTOR_INPUT, options.twoFactorCode);
         await this.page.click(InstagramSelectors.TWO_FACTOR_SUBMIT);
-        await this.page.waitForNavigation({ waitUntil: 'networkidle' });
       }
-      
-      // Handle save login info dialog
+
+      // Handle "Save Login Info" prompt
       const saveLoginButton = await this.page.$(InstagramSelectors.SAVE_LOGIN_INFO);
       if (saveLoginButton) {
-        await saveLoginButton.click();
-        await this.page.waitForTimeout(2000);
+        await this.page.click(InstagramSelectors.NOT_NOW_BUTTON);
       }
-      
-      // Handle turn on notifications dialog
-      const notNowButton = await this.page.$(InstagramSelectors.NOT_NOW_BUTTON);
-      if (notNowButton) {
-        await notNowButton.click();
-        await this.page.waitForTimeout(2000);
-      }
-      
-      // Verify successful login by checking for profile icon
-      await this.page.waitForSelector(InstagramSelectors.PROFILE_ICON, {
-        timeout: 10000
-      });
-      
+
+      // Verify login success
+      await this.page.waitForSelector(InstagramSelectors.PROFILE_ICON);
       this.isLoggedIn = true;
-      this.logger.info(`Successfully logged in as ${instagramUsername}`);
-      return true;
+
+      this.logger.info('Successfully logged in to Instagram');
     } catch (error) {
-      this.logger.error('Login failed', { error });
-      
-      // Take screenshot of failed login
-      if (this.page) {
-        await this.takeScreenshot('login-failed.png');
-      }
-      
-      // Check for common error scenarios
-      if (this.page) {
-        if (await this.page.$(InstagramSelectors.INCORRECT_PASSWORD)) {
-          this.logger.error('Incorrect password detected');
-        } else if (await this.page.$(InstagramSelectors.SUSPICIOUS_LOGIN)) {
-          this.logger.error('Suspicious login activity detected');
-        } else if (await this.page.$(InstagramSelectors.ACCOUNT_DISABLED)) {
-          this.logger.error('Account disabled or locked');
-        }
-      }
-      
-      return false;
+      this.logger.error('Failed to login to Instagram', { error });
+      throw error;
     }
   }
-  
-  async createPost(imageUrl: string, caption: string, location?: string): Promise<boolean> {
+
+  /**
+   * Create a new post
+   */
+  async createPost(options: PostOptions): Promise<void> {
     if (!this.page || !this.isLoggedIn) {
-      throw new Error('Not logged in to Instagram');
+      throw new Error('Not logged in');
     }
-    
+
     try {
       await this.rateLimiter.wait();
-      
+
       // Click create post button
       await this.page.click(InstagramSelectors.CREATE_POST_BUTTON);
-      
-      // Wait for file selector to appear
       await this.page.waitForSelector(InstagramSelectors.FILE_INPUT);
-      
-      // Upload image
+
+      // Upload media files
       const fileInput = await this.page.$(InstagramSelectors.FILE_INPUT);
-      await fileInput?.setInputFiles(imageUrl);
-      
-      // Wait for image to upload
-      await this.page.waitForSelector(InstagramSelectors.NEXT_BUTTON);
+      if (!fileInput) {
+        throw new Error('File input not found');
+      }
+
+      await fileInput.setInputFiles(options.mediaUrls);
       await this.page.click(InstagramSelectors.NEXT_BUTTON);
-      
-      // Wait for next screen
+
+      // Add caption and hashtags
       await this.page.waitForSelector(InstagramSelectors.CAPTION_INPUT);
-      
+      const caption = `${options.caption}\n\n${options.hashtags.join(' ')}`;
+      await this.page.fill(InstagramSelectors.CAPTION_INPUT, caption);
+
       // Add location if provided
-      if (location) {
+      if (options.location) {
         await this.page.click(InstagramSelectors.ADD_LOCATION_BUTTON);
-        await this.page.fill(InstagramSelectors.LOCATION_SEARCH_INPUT, location);
-        await this.page.waitForSelector(InstagramSelectors.LOCATION_RESULT);
+        await this.page.fill(InstagramSelectors.LOCATION_SEARCH_INPUT, options.location);
         await this.page.click(InstagramSelectors.LOCATION_RESULT);
       }
-      
-      // Add caption
-      await this.page.fill(InstagramSelectors.CAPTION_INPUT, caption);
-      
-      // Add random delay to simulate human behavior
-      await this.page.waitForTimeout(Math.floor(Math.random() * 2000) + 1000);
-      
+
       // Share post
       await this.page.click(InstagramSelectors.SHARE_BUTTON);
-      
-      // Wait for confirmation
-      await this.page.waitForSelector(InstagramSelectors.POST_SUCCESS_INDICATOR, {
-        timeout: 60000
-      });
-      
+      await this.page.waitForSelector(InstagramSelectors.POST_SUCCESS_INDICATOR);
+
       this.logger.info('Post created successfully');
-      return true;
     } catch (error) {
       this.logger.error('Failed to create post', { error });
-      if (this.page) {
-        await this.takeScreenshot('create-post-failed.png');
-      }
-      return false;
+      throw error;
     }
   }
-  
-  async likePost(postUrl: string): Promise<boolean> {
+
+  /**
+   * Get recent posts from a profile
+   */
+  async getRecentPosts(username: string, limit: number = 12): Promise<PostData[]> {
     if (!this.page || !this.isLoggedIn) {
-      throw new Error('Not logged in to Instagram');
+      throw new Error('Not logged in');
     }
-    
+
     try {
       await this.rateLimiter.wait();
-      
-      // Navigate to post
-      await this.page.goto(postUrl, { waitUntil: 'networkidle' });
-      
-      // Check if already liked
-      const isLiked = await this.page.$(InstagramSelectors.UNLIKE_BUTTON);
-      if (isLiked) {
-        this.logger.info('Post already liked');
-        return true;
-      }
-      
-      // Click like button
+
+      // Navigate to profile
+      await this.page.goto(`https://www.instagram.com/${username}/`);
+      await this.page.waitForSelector(InstagramSelectors.POST_ITEMS);
+
+      // Extract post data
+      const posts = await this.page.evaluate((selectors: typeof InstagramSelectors, postsNeeded: number) => {
+        const postElements = document.querySelectorAll(selectors.POST_ITEMS);
+        const posts: PostData[] = [];
+
+        postElements.forEach((post, index) => {
+          if (index >= postsNeeded) return;
+
+          const postData: PostData = {
+            id: post.getAttribute('data-id') || '',
+            type: 'image',
+            caption: post.querySelector(selectors.POST_CAPTION)?.textContent || '',
+            hashtags: Array.from(post.querySelectorAll(selectors.POST_HASHTAGS))
+              .map(tag => tag.textContent || '')
+              .filter(Boolean),
+            likeCount: parseInt(post.querySelector(selectors.POST_LIKE_COUNT)?.textContent || '0'),
+            commentCount: parseInt(post.querySelector(selectors.POST_COMMENT_COUNT)?.textContent || '0'),
+            timestamp: post.querySelector(selectors.POST_TIMESTAMP)?.getAttribute('datetime') || '',
+            url: post.querySelector(selectors.POST_IMAGE)?.getAttribute('src') || ''
+          };
+
+          if (post.querySelector(selectors.VIDEO_INDICATOR)) {
+            postData.type = 'video';
+          } else if (post.querySelectorAll(selectors.POST_IMAGE).length > 1) {
+            postData.type = 'carousel';
+          }
+
+          posts.push(postData);
+        });
+
+        return posts;
+      }, InstagramSelectors, limit);
+
+      return posts;
+    } catch (error) {
+      this.logger.error('Failed to get recent posts', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Get profile information
+   */
+  async getProfile(username: string): Promise<any> {
+    if (!this.page || !this.isLoggedIn) {
+      throw new Error('Not logged in');
+    }
+
+    try {
+      await this.rateLimiter.wait();
+
+      await this.page.goto(`https://www.instagram.com/${username}/`);
+      await this.page.waitForSelector(InstagramSelectors.PROFILE_USERNAME);
+
+      return await this.page.evaluate((selectors: typeof InstagramSelectors) => {
+        return {
+          username: document.querySelector(selectors.PROFILE_USERNAME)?.textContent || '',
+          fullName: document.querySelector(selectors.PROFILE_FULL_NAME)?.textContent || '',
+          bio: document.querySelector(selectors.PROFILE_BIO)?.textContent || '',
+          website: document.querySelector(selectors.PROFILE_WEBSITE)?.getAttribute('href') || '',
+          followerCount: parseInt(document.querySelector(selectors.FOLLOWER_COUNT)?.textContent || '0'),
+          followingCount: parseInt(document.querySelector(selectors.FOLLOWING_COUNT)?.textContent || '0'),
+          postCount: parseInt(document.querySelector(selectors.POST_COUNT)?.textContent || '0'),
+          isVerified: !!document.querySelector(selectors.VERIFIED_BADGE),
+          isPrivate: !!document.querySelector(selectors.PRIVATE_ACCOUNT_INDICATOR)
+        };
+      }, InstagramSelectors);
+    } catch (error) {
+      this.logger.error('Failed to get profile information', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Like a post
+   */
+  async likePost(postUrl: string): Promise<void> {
+    if (!this.page || !this.isLoggedIn) {
+      throw new Error('Not logged in');
+    }
+
+    try {
+      await this.rateLimiter.wait();
+
+      await this.page.goto(postUrl);
+      await this.page.waitForSelector(InstagramSelectors.LIKE_BUTTON);
       await this.page.click(InstagramSelectors.LIKE_BUTTON);
-      
-      // Verify like was successful
-      await this.page.waitForSelector(InstagramSelectors.UNLIKE_BUTTON, {
-        timeout: 5000
-      });
-      
-      this.logger.info(`Successfully liked post: ${postUrl}`);
-      return true;
+
+      this.logger.info('Post liked successfully');
     } catch (error) {
-      this.logger.error(`Failed to like post: ${postUrl}`, { error });
-      return false;
+      this.logger.error('Failed to like post', { error });
+      throw error;
     }
   }
-  
-  async commentOnPost(postUrl: string, comment: string): Promise<boolean> {
+
+  /**
+   * Comment on a post
+   */
+  async commentOnPost(postUrl: string, comment: string): Promise<void> {
     if (!this.page || !this.isLoggedIn) {
-      throw new Error('Not logged in to Instagram');
+      throw new Error('Not logged in');
     }
-    
+
     try {
       await this.rateLimiter.wait();
-      
-      // Navigate to post
-      await this.page.goto(postUrl, { waitUntil: 'networkidle' });
-      
-      // Click comment input
-      await this.page.click(InstagramSelectors.COMMENT_INPUT);
-      
-      // Type comment with human-like typing pattern
-      for (const char of comment) {
-        await this.page.keyboard.type(char);
-        await this.page.waitForTimeout(Math.random() * 100);
-      }
-      
-      // Add random delay before posting
-      await this.page.waitForTimeout(Math.floor(Math.random() * 1000) + 500);
-      
-      // Submit comment
-      await this.page.keyboard.press('Enter');
-      
-      // Wait for comment to appear
-      await this.page.waitForTimeout(3000);
-      
-      this.logger.info(`Successfully commented on post: ${postUrl}`);
-      return true;
+
+      await this.page.goto(postUrl);
+      await this.page.waitForSelector(InstagramSelectors.COMMENT_INPUT);
+      await this.page.fill(InstagramSelectors.COMMENT_INPUT, comment);
+      await this.page.click(InstagramSelectors.COMMENT_SUBMIT);
+
+      this.logger.info('Comment posted successfully');
     } catch (error) {
-      this.logger.error(`Failed to comment on post: ${postUrl}`, { error });
-      return false;
+      this.logger.error('Failed to post comment', { error });
+      throw error;
     }
   }
-  
-  async followUser(username: string): Promise<boolean> {
+
+  /**
+   * Follow a user
+   */
+  async followUser(username: string): Promise<void> {
     if (!this.page || !this.isLoggedIn) {
-      throw new Error('Not logged in to Instagram');
+      throw new Error('Not logged in');
     }
-    
+
     try {
       await this.rateLimiter.wait();
-      
-      // Navigate to user profile
-      await this.page.goto(`https://www.instagram.com/${username}/`, {
-        waitUntil: 'networkidle'
-      });
-      
-      // Check if already following
-      const isFollowing = await this.page.$(InstagramSelectors.UNFOLLOW_BUTTON);
-      if (isFollowing) {
-        this.logger.info(`Already following ${username}`);
-        return true;
-      }
-      
-      // Click follow button
+
+      await this.page.goto(`https://www.instagram.com/${username}/`);
+      await this.page.waitForSelector(InstagramSelectors.FOLLOW_BUTTON);
       await this.page.click(InstagramSelectors.FOLLOW_BUTTON);
-      
-      // Verify follow was successful
-      await this.page.waitForSelector(InstagramSelectors.UNFOLLOW_BUTTON, {
-        timeout: 5000
-      });
-      
-      this.logger.info(`Successfully followed user: ${username}`);
-      return true;
+
+      this.logger.info('User followed successfully');
     } catch (error) {
-      this.logger.error(`Failed to follow user: ${username}`, { error });
-      return false;
+      this.logger.error('Failed to follow user', { error });
+      throw error;
     }
   }
-  
-  async unfollowUser(username: string): Promise<boolean> {
+
+  /**
+   * Unfollow a user
+   */
+  async unfollowUser(username: string): Promise<void> {
     if (!this.page || !this.isLoggedIn) {
-      throw new Error('Not logged in to Instagram');
+      throw new Error('Not logged in');
     }
-    
+
     try {
       await this.rateLimiter.wait();
-      
-      // Navigate to user profile
-      await this.page.goto(`https://www.instagram.com/${username}/`, {
-        waitUntil: 'networkidle'
-      });
-      
-      // Check if following
-      const isFollowing = await this.page.$(InstagramSelectors.UNFOLLOW_BUTTON);
-      if (!isFollowing) {
-        this.logger.info(`Not following ${username}`);
-        return true;
-      }
-      
-      // Click unfollow button
+
+      await this.page.goto(`https://www.instagram.com/${username}/`);
+      await this.page.waitForSelector(InstagramSelectors.UNFOLLOW_BUTTON);
       await this.page.click(InstagramSelectors.UNFOLLOW_BUTTON);
-      
-      // Confirm unfollow if dialog appears
-      const confirmButton = await this.page.$(InstagramSelectors.CONFIRM_UNFOLLOW_BUTTON);
-      if (confirmButton) {
-        await confirmButton.click();
-      }
-      
-      // Verify unfollow was successful
-      await this.page.waitForSelector(InstagramSelectors.FOLLOW_BUTTON, {
-        timeout: 5000
-      });
-      
-      this.logger.info(`Successfully unfollowed user: ${username}`);
-      return true;
+      await this.page.click(InstagramSelectors.CONFIRM_UNFOLLOW_BUTTON);
+
+      this.logger.info('User unfollowed successfully');
     } catch (error) {
-      this.logger.error(`Failed to unfollow user: ${username}`, { error });
-      return false;
+      this.logger.error('Failed to unfollow user', { error });
+      throw error;
     }
-  }
-  
-  private async takeScreenshot(filename: string): Promise<void> {
-    if (!this.page) {
-      return;
-    }
-    
-    try {
-      await this.page.screenshot({ path: `./screenshots/${filename}` });
-    } catch (error) {
-      this.logger.error(`Failed to take screenshot: ${filename}`, { error });
-    }
-  }
-  
-  private async getTwoFactorCode(): Promise<string> {
-    // Implementation would depend on how you get 2FA codes
-    // Options include:
-    // 1. Read from config
-    // 2. SMS retrieval API
-    // 3. Email retrieval
-    // 4. Manual input mechanism
-    
-    // Placeholder implementation - would read from config in real app
-    const twoFactorCode = this.config.get('instagram.twoFactorCode', '');
-    
-    if (!twoFactorCode) {
-      throw new Error('Two-factor authentication code not available');
-    }
-    
-    return twoFactorCode;
   }
 }
