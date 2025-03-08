@@ -1,4 +1,4 @@
-import { Browser, Page } from 'playwright';
+import { Browser, Page, ElementHandle } from 'playwright';
 import { Logger } from '../core/logger';
 import { Config } from '../core/config';
 import { ProxyManager } from './proxies';
@@ -233,7 +233,7 @@ export class InstagramAutomation {
         return posts;
       }, InstagramSelectors, limit);
 
-      return posts;
+      return posts as PostData[];
     } catch (error) {
       this.logger.error('Failed to get recent posts', { error });
       throw error;
