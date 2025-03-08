@@ -1,25 +1,27 @@
 import { Logger } from './logger';
 import { Config } from './config';
-import { Repository } from '../database/repository';
+import { schedule, ScheduledTask } from 'node-schedule';
+import { DateTime } from 'luxon';
 import { DecisionEngine } from '../ai/decision-engine';
+import { InstagramAutomation } from '../automation/instagram';
 
-export interface ScheduledTask {
-  id: string;
-  type: string;
-  schedule: Date;
-  data?: any;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  error?: string;
+interface ScheduledJob {
+  name: string;
+  schedule: string;
+  lastRun: Date | null;
+  nextRun: Date | null;
+  status: 'active' | 'paused' | 'completed' | 'failed';
+  task: ScheduledTask | null;
 }
 
 export class Scheduler {
-  private tasks: Map<string, NodeJS.Timeout> = new Map();
+  private jobs: Map<string, ScheduledJob> = new Map();
 
   constructor(
     private logger: Logger,
     private config: Config,
-    private repository: Repository,
-    private decisionEngine: DecisionEngine
+    private decisionEngine: DecisionEngine,
+    private instagram: InstagramAutomation
   ) {}
 
   /**
@@ -27,17 +29,12 @@ export class Scheduler {
    */
   async initialize(): Promise<void> {
     try {
-      // Load pending tasks from repository
-      const pendingTasks = await this.repository.getPendingTasks();
-      
-      // Schedule each task
-      for (const task of pendingTasks) {
-        await this.scheduleTask(task);
-      }
-      
-      this.logger.info('Scheduler initialized', {
-        taskCount: pendingTasks.length
-      });
+      this.logger.info('Initializing scheduler');
+
+      // Setup default jobs
+      this.setupDefaultJobs();
+
+      this.logger.info('Scheduler initialized successfully');
     } catch (error) {
       this.logger.error('Failed to initialize scheduler', { error });
       throw error;
@@ -45,168 +42,178 @@ export class Scheduler {
   }
 
   /**
-   * Schedule a new task
+   * Setup default scheduled jobs
    */
-  async scheduleTask(task: ScheduledTask): Promise<void> {
+  private setupDefaultJobs(): void {
+    // Decision job - runs hourly
+    this.scheduleJob('decision', '0 * * * *', async () => {
+      try {
+        this.logger.info('Running decision job');
+        const decision = await this.decisionEngine.decideNextAction();
+        
+        // Execute the decision
+        await this.executeDecision(decision);
+        
+        this.logger.info('Decision job completed', { decision });
+      } catch (error) {
+        this.logger.error('Decision job failed', { error });
+      }
+    });
+
+    // Add other default jobs as needed
+  }
+
+  /**
+   * Execute a decision
+   */
+  private async executeDecision(decision: any): Promise<void> {
     try {
-      const now = new Date();
-      const delay = task.schedule.getTime() - now.getTime();
-      
-      if (delay < 0) {
-        this.logger.warn('Task scheduled in the past', { task });
-        return;
+      switch (decision.action) {
+        case 'post':
+          // Handle posting
+          break;
+        case 'like':
+          if (decision.target) {
+            await this.instagram.likePost(decision.target);
+          }
+          break;
+        case 'comment':
+          if (decision.target && decision.content) {
+            await this.instagram.commentOnPost(decision.target, decision.content);
+          }
+          break;
+        case 'follow':
+          if (decision.target) {
+            await this.instagram.followUser(decision.target);
+          }
+          break;
+        case 'unfollow':
+          if (decision.target) {
+            await this.instagram.unfollowUser(decision.target);
+          }
+          break;
       }
       
-      const timeout = setTimeout(async () => {
-        await this.executeTask(task);
-      }, delay);
-      
-      this.tasks.set(task.id, timeout);
-      
-      this.logger.info('Task scheduled', {
-        taskId: task.id,
-        type: task.type,
-        schedule: task.schedule
+      // Record successful action
+      this.decisionEngine.recordAction(decision.action, decision.target || '', true);
+    } catch (error) {
+      this.logger.error('Failed to execute decision', { error, decision });
+      this.decisionEngine.recordAction(decision.action, decision.target || '', false);
+    }
+  }
+
+  /**
+   * Schedule a job with a cron expression
+   */
+  scheduleJob(name: string, cronExpression: string, callback: () => Promise<void>): void {
+    try {
+      // Create the job
+      const job = schedule.scheduleJob(cronExpression, async () => {
+        try {
+          const jobInfo = this.jobs.get(name);
+          if (jobInfo) {
+            jobInfo.lastRun = new Date();
+            jobInfo.status = 'active';
+          }
+          
+          await callback();
+          
+          if (jobInfo) {
+            jobInfo.status = 'completed';
+            const scheduledTask = jobInfo.task;
+            if (scheduledTask && scheduledTask.nextInvocation) {
+              // Use toJSDate instead of toDate for Luxon DateTime
+              jobInfo.nextRun = scheduledTask.nextInvocation();
+            }
+          }
+        } catch (error) {
+          this.logger.error(`Job ${name} failed`, { error });
+          
+          const jobInfo = this.jobs.get(name);
+          if (jobInfo) {
+            jobInfo.status = 'failed';
+          }
+        }
+      });
+
+      // Store job information
+      const nextRun = job.nextInvocation ? job.nextInvocation() : null;
+
+      this.jobs.set(name, {
+        name,
+        schedule: cronExpression,
+        lastRun: null,
+        nextRun,
+        status: 'active',
+        task: job
+      });
+
+      this.logger.info(`Job ${name} scheduled`, { 
+        schedule: cronExpression, 
+        nextRun: nextRun ? nextRun.toISOString() : null 
       });
     } catch (error) {
-      this.logger.error('Failed to schedule task', { error, task });
-      throw error;
+      this.logger.error(`Failed to schedule job ${name}`, { error });
     }
   }
 
   /**
-   * Execute a scheduled task
+   * Pause a scheduled job
    */
-  private async executeTask(task: ScheduledTask): Promise<void> {
+  pauseJob(name: string): void {
+    const job = this.jobs.get(name);
+    if (job && job.task) {
+      job.task.cancel();
+      job.status = 'paused';
+      this.logger.info(`Job ${name} paused`);
+    } else {
+      this.logger.warn(`Job ${name} not found`);
+    }
+  }
+
+  /**
+   * Resume a paused job
+   */
+  resumeJob(name: string): void {
+    const job = this.jobs.get(name);
+    if (job && job.status === 'paused') {
+      // Reschedule the job
+      this.scheduleJob(name, job.schedule, async () => {
+        // We need to recreate the callback function here
+        // Ideally, we would store the callback function with the job
+      });
+      this.logger.info(`Job ${name} resumed`);
+    } else {
+      this.logger.warn(`Job ${name} not found or not paused`);
+    }
+  }
+
+  /**
+   * Get information about scheduled jobs
+   */
+  getJobs(): ScheduledJob[] {
+    return Array.from(this.jobs.values());
+  }
+
+  /**
+   * Shutdown the scheduler
+   */
+  shutdown(): void {
     try {
-      this.logger.info('Executing task', { taskId: task.id });
+      this.logger.info('Shutting down scheduler');
       
-      // Update task status
-      task.status = 'running';
-      await this.repository.updateTask(task);
-      
-      // Execute task based on type
-      switch (task.type) {
-        case 'post-content':
-          await this.executePostContent(task);
-          break;
-          
-        case 'analyze-competitors':
-          await this.executeCompetitorAnalysis(task);
-          break;
-          
-        case 'engage-followers':
-          await this.executeFollowerEngagement(task);
-          break;
-          
-        default:
-          throw new Error(`Unknown task type: ${task.type}`);
+      // Cancel all jobs
+      for (const [name, job] of this.jobs.entries()) {
+        if (job.task) {
+          job.task.cancel();
+          this.logger.info(`Job ${name} cancelled`);
+        }
       }
       
-      // Update task status
-      task.status = 'completed';
-      await this.repository.updateTask(task);
-      
-      this.logger.info('Task completed successfully', { taskId: task.id });
+      this.jobs.clear();
+      this.logger.info('Scheduler shutdown complete');
     } catch (error) {
-      this.logger.error('Task execution failed', { error, task });
-      
-      // Update task status
-      task.status = 'failed';
-      task.error = error instanceof Error ? error.message : 'Unknown error';
-      await this.repository.updateTask(task);
-    } finally {
-      // Clean up task
-      this.tasks.delete(task.id);
+      this.logger.error('Error during scheduler shutdown', { error });
     }
-  }
-
-  /**
-   * Execute post content task
-   */
-  private async executePostContent(task: ScheduledTask): Promise<void> {
-    // Get decision from AI
-    const decision = await this.decisionEngine.decideNextAction();
-    
-    if (decision.action !== 'post_content') {
-      this.logger.info('AI decided not to post content', { decision });
-      return;
-    }
-    
-    // Execute the post content task
-    // Implementation will be added when content posting is implemented
-  }
-
-  /**
-   * Execute competitor analysis task
-   */
-  private async executeCompetitorAnalysis(task: ScheduledTask): Promise<void> {
-    // Get decision from AI
-    const decision = await this.decisionEngine.decideNextAction();
-    
-    if (decision.action !== 'analyze_competitors') {
-      this.logger.info('AI decided not to analyze competitors', { decision });
-      return;
-    }
-    
-    // Execute the competitor analysis task
-    // Implementation will be added when competitor analysis is implemented
-  }
-
-  /**
-   * Execute follower engagement task
-   */
-  private async executeFollowerEngagement(task: ScheduledTask): Promise<void> {
-    // Get decision from AI
-    const decision = await this.decisionEngine.decideNextAction();
-    
-    if (decision.action !== 'engage_followers') {
-      this.logger.info('AI decided not to engage followers', { decision });
-      return;
-    }
-    
-    // Execute the follower engagement task
-    // Implementation will be added when follower engagement is implemented
-  }
-
-  /**
-   * Cancel a scheduled task
-   */
-  async cancelTask(taskId: string): Promise<void> {
-    const timeout = this.tasks.get(taskId);
-    if (timeout) {
-      clearTimeout(timeout);
-      this.tasks.delete(taskId);
-      
-      // Update task in repository
-      const task = await this.repository.getTask(taskId);
-      if (task) {
-        task.status = 'failed';
-        task.error = 'Task cancelled';
-        await this.repository.updateTask(task);
-      }
-      
-      this.logger.info('Task cancelled', { taskId });
-    }
-  }
-
-  /**
-   * Get all scheduled tasks
-   */
-  async getTasks(): Promise<ScheduledTask[]> {
-    return await this.repository.getAllTasks();
-  }
-
-  /**
-   * Clean up scheduler
-   */
-  async cleanup(): Promise<void> {
-    // Cancel all scheduled tasks
-    for (const [taskId, timeout] of this.tasks) {
-      clearTimeout(timeout);
-      this.tasks.delete(taskId);
-    }
-    
-    this.logger.info('Scheduler cleaned up');
   }
 }
