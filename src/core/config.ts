@@ -1,94 +1,129 @@
-import dotenv from 'dotenv';
-import path from 'path';
+import * as dotenv from 'dotenv';
+import * as fs from 'fs';
+import * as path from 'path';
 
 // Load environment variables
 dotenv.config();
 
-interface Config {
-  get<T>(key: string): T;
-  set<T>(key: string, value: T): void;
-}
-
-class Configuration implements Config {
-  private config: Map<string, any>;
+/**
+ * Configuration manager
+ * Handles loading and accessing configuration settings from:
+ * 1. Environment variables
+ * 2. Config files
+ * 3. Default values
+ */
+export class Config {
+  private config: Record<string, any> = {};
 
   constructor() {
-    this.config = new Map();
-    this.loadDefaults();
+    // Load configuration from environment
+    this.loadFromEnvironment();
+
+    // Load configuration from files
+    this.loadFromFile('config/default.json');
+    const environment = process.env.NODE_ENV || 'development';
+    this.loadFromFile(`config/${environment}.json`);
   }
 
   /**
-   * Get configuration value
+   * Get configuration value by path
    */
-  get<T>(key: string): T {
-    const value = this.config.get(key);
-    if (value === undefined) {
-      throw new Error(`Configuration key not found: ${key}`);
+  get<T>(path: string, defaultValue?: T): T {
+    const parts = path.split('.');
+    let current: any = this.config;
+
+    for (const part of parts) {
+      if (current === undefined || current === null || typeof current !== 'object') {
+        return defaultValue as T;
+      }
+      current = current[part];
     }
-    return value as T;
+
+    return (current === undefined) ? defaultValue as T : current;
   }
 
   /**
    * Set configuration value
    */
-  set<T>(key: string, value: T): void {
-    this.config.set(key, value);
+  set(path: string, value: any): void {
+    const parts = path.split('.');
+    let current = this.config;
+
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!(part in current)) {
+        current[part] = {};
+      }
+      current = current[part];
+    }
+
+    current[parts[parts.length - 1]] = value;
   }
 
   /**
-   * Load default configuration values
+   * Load configuration from environment variables
    */
-  private loadDefaults(): void {
-    // App configuration
-    this.set('app.version', '1.0.0');
-    this.set('app.name', 'Instagram AI Bot');
-    this.set('app.environment', process.env.NODE_ENV || 'development');
-
-    // Instagram configuration
-    this.set('instagram.username', process.env.INSTAGRAM_USERNAME);
-    this.set('instagram.password', process.env.INSTAGRAM_PASSWORD);
-    this.set('instagram.userAgent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-    this.set('instagram.limits', {
-      requestsPerHour: 100,
-      postsPerDay: 3,
-      storiesPerDay: 10,
-      followsPerDay: 50,
-      unfollowsPerDay: 50,
-      commentsPerDay: 100,
-      likesPerDay: 500
+  private loadFromEnvironment(): void {
+    // Convert environment variables to nested configuration
+    Object.keys(process.env).forEach(key => {
+      if (key.startsWith('BOT_')) {
+        const configKey = key.substring(4).toLowerCase().replace(/_/g, '.');
+        this.set(configKey, process.env[key]);
+      }
     });
 
-    // API configuration
-    this.set('api.openai.key', process.env.OPENAI_API_KEY);
-    this.set('api.anthropic.key', process.env.ANTHROPIC_API_KEY);
-    this.set('api.braveSearch.key', process.env.BRAVE_SEARCH_API_KEY);
+    // Load specific important variables
+    if (process.env.OPENAI_API_KEY) {
+      this.set('openai.apiKey', process.env.OPENAI_API_KEY);
+    }
 
-    // Content configuration
-    this.set('content.niche', process.env.CONTENT_NICHE || '');
-    this.set('content.targetAudience', process.env.TARGET_AUDIENCE || '');
-    this.set('content.brandVoice', process.env.BRAND_VOICE || '');
-    this.set('content.carouselImageCount', 5);
+    if (process.env.ANTHROPIC_API_KEY) {
+      this.set('anthropic.apiKey', process.env.ANTHROPIC_API_KEY);
+    }
 
-    // Proxy configuration
-    this.set('proxy.type', process.env.PROXY_TYPE || 'none');
-    this.set('proxy.apiUrl', process.env.PROXY_API_URL);
-    this.set('proxy.apiKey', process.env.PROXY_API_KEY);
-    this.set('proxy.file', process.env.PROXY_FILE);
-    this.set('proxy.rotationInterval', parseInt(process.env.PROXY_ROTATION_INTERVAL || '3600'));
+    if (process.env.BRAVE_API_KEY) {
+      this.set('brave.apiKey', process.env.BRAVE_API_KEY);
+    }
 
-    // Database configuration
-    this.set('database.url', process.env.DATABASE_URL);
-    this.set('database.name', process.env.DATABASE_NAME);
+    if (process.env.INSTAGRAM_USERNAME) {
+      this.set('instagram.username', process.env.INSTAGRAM_USERNAME);
+    }
 
-    // File paths
-    this.set('paths.uploads', path.join(process.cwd(), 'uploads'));
-    this.set('paths.logs', path.join(process.cwd(), 'logs'));
-    this.set('paths.data', path.join(process.cwd(), 'data'));
+    if (process.env.INSTAGRAM_PASSWORD) {
+      this.set('instagram.password', process.env.INSTAGRAM_PASSWORD);
+    }
+  }
 
-    // Competitors to analyze
-    this.set('competitors', (process.env.COMPETITORS || '').split(',').filter(Boolean));
+  /**
+   * Load configuration from file
+   */
+  private loadFromFile(filePath: string): void {
+    const fullPath = path.resolve(process.cwd(), filePath);
+
+    if (fs.existsSync(fullPath)) {
+      try {
+        const fileContent = fs.readFileSync(fullPath, 'utf-8');
+        const fileConfig = JSON.parse(fileContent);
+        this.merge(this.config, fileConfig);
+      } catch (error) {
+        console.error(`Error loading config from ${fullPath}:`, error);
+      }
+    }
+  }
+
+  /**
+   * Merge configuration objects
+   */
+  private merge(target: Record<string, any>, source: Record<string, any>): void {
+    Object.keys(source).forEach(key => {
+      if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+        if (!target[key]) {
+          target[key] = {};
+        }
+        this.merge(target[key], source[key]);
+      } else {
+        target[key] = source[key];
+      }
+    });
   }
 }
-
-export const config = new Configuration();
-export type { Config };
